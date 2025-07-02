@@ -138,7 +138,7 @@ curl -X POST http://localhost:5002/download \
 
 #### High-Quality Audio (192k MP3)
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -153,7 +153,7 @@ curl -X POST http://localhost:5000/download \
 
 #### Best Audio Quality (Original Format)
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -168,7 +168,7 @@ curl -X POST http://localhost:5000/download \
 
 #### Best Quality Video
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -179,7 +179,7 @@ curl -X POST http://localhost:5000/download \
 
 #### 720p Video
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -190,7 +190,7 @@ curl -X POST http://localhost:5000/download \
 
 #### 480p Video
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -201,7 +201,7 @@ curl -X POST http://localhost:5000/download \
 
 #### Worst Quality (Smallest File)
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -216,7 +216,7 @@ curl -X POST http://localhost:5000/download \
 
 #### Get Subtitle Information
 ```bash
-curl -X POST http://localhost:5000/subtitles \
+curl -X POST http://localhost:5002/subtitles \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0"
@@ -225,7 +225,7 @@ curl -X POST http://localhost:5000/subtitles \
 
 #### Download Video with Subtitles
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -243,7 +243,7 @@ curl -X POST http://localhost:5000/download \
 
 #### MP4 Video Only
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -254,7 +254,7 @@ curl -X POST http://localhost:5000/download \
 
 #### WebM Video Only
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -265,7 +265,7 @@ curl -X POST http://localhost:5000/download \
 
 #### Best Video + Best Audio (Separate Streams)
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -280,7 +280,7 @@ curl -X POST http://localhost:5000/download \
 
 #### Low Bandwidth (Mobile-Friendly)
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -291,7 +291,7 @@ curl -X POST http://localhost:5000/download \
 
 #### Audio for Mobile (Low Quality)
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -310,7 +310,7 @@ curl -X POST http://localhost:5000/download \
 
 #### Verbose Output (for debugging)
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -325,7 +325,7 @@ curl -X POST http://localhost:5000/download \
 
 #### Test with Headers Display
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
@@ -341,7 +341,7 @@ curl -X POST http://localhost:5000/download \
 
 ### Invalid URL Test
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://invalid-url.com/video"
@@ -350,7 +350,7 @@ curl -X POST http://localhost:5000/download \
 
 ### Missing URL Test
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
@@ -380,7 +380,7 @@ $body = @{
     format = "best"
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri "http://localhost:5000/download" `
+Invoke-RestMethod -Uri "http://localhost:5002/download" `
     -Method Post `
     -Body $body `
     -ContentType "application/json" `
@@ -397,7 +397,7 @@ $body = @{
     }
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri "http://localhost:5000/download" `
+Invoke-RestMethod -Uri "http://localhost:5002/download" `
     -Method Post `
     -Body $body `
     -ContentType "application/json" `

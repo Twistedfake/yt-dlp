@@ -486,7 +486,7 @@ class YtDlpAPI:
                     'traceback': traceback.format_exc()
                 }), 500
     
-    def run(self, host='0.0.0.0', port=5000, debug=False):
+    def run(self, host='0.0.0.0', port=5002, debug=False):
         """Run the Flask server"""
         self.app.run(host=host, port=port, debug=debug)
 
@@ -550,7 +550,7 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(description='yt-dlp HTTP API Server')
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
-    parser.add_argument('--port', type=int, default=5000, help='Port to bind to')
+    parser.add_argument('--port', type=int, default=5002, help='Port to bind to')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     
     args = parser.parse_args()
@@ -568,7 +568,7 @@ if __name__ == '__main__':
         print("\n📋 Cookie Authentication Help:")
         print("• Browser cookies: POST with {\"options\": {\"cookiesfrombrowser\": \"chrome\"}}")
         print("• Cookie file: POST with {\"options\": {\"cookiefile\": \"/path/to/cookies.txt\"}}")
-        print("• Test cookies: GET http://localhost:5000/test-cookies")
+        print("• Test cookies: GET http://localhost:5002/test-cookies")
         print("\nPress Ctrl+C to stop the server")
         print("-" * 50)
         api.run(host=args.host, port=args.port, debug=args.debug)

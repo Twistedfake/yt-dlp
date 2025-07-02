@@ -56,7 +56,7 @@ class DownloadResult:
 class DownloadConfig:
     """Comprehensive configuration for downloads"""
     # API Settings
-    api_base: str = 'http://localhost:5000'
+    api_base: str = 'http://localhost:5002'
     
     # Performance Settings
     max_workers: int = 4

@@ -68,5 +68,5 @@ Your yt-dlp API is now running in a Docker container at `http://localhost:5002`
 
 ## 🚨 Troubleshooting
 - **"Docker Desktop is not running"** → Start Docker Desktop from Windows Start menu
-- **Port 5000 in use** → Change port: `docker run -p 5002:5002 yt-dlp-api`
+- **Port 5002 in use** → Change port: `docker run -p 5003:5002 yt-dlp-api`
 - **Build fails** → Check Docker Desktop is running and try `docker-compose build --no-cache` 

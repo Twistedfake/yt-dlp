@@ -58,15 +58,15 @@ environment:
 
 ### Port Configuration
 
-By default, the API runs on port 5000. To use a different port:
+By default, the API runs on port 5002. To use a different port:
 
 ```bash
 # Docker run
-docker run -p 8080:5000 yt-dlp-api
+docker run -p 8080:5002 yt-dlp-api
 
 # Docker compose - edit docker-compose.yml
 ports:
-  - "8080:5000"
+  - "8080:5002"
 ```
 
 ### Resource Limits
@@ -80,16 +80,16 @@ Adjust these based on your needs.
 ## 🚀 Usage
 
 Once running, the API will be available at:
-- `http://localhost:5000` (or your configured port)
+- `http://localhost:5002` (or your configured port)
 
 ### Test the API
 
 ```bash
 # Health check
-curl http://localhost:5000/
+curl http://localhost:5002/
 
 # Download a video
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}' \
   --output video.mp4
@@ -98,7 +98,7 @@ curl -X POST http://localhost:5000/download \
 ## 🔍 Health Monitoring
 
 The container includes health checks:
-- Endpoint: `http://localhost:5000/`
+- Endpoint: `http://localhost:5002/`
 - Interval: 30 seconds
 - Timeout: 10 seconds
 - Retries: 3
@@ -159,8 +159,8 @@ The Docker image includes:
 
 1. **Port already in use**
    ```bash
-   # Check what's using port 5000
-   netstat -tulpn | grep 5000
+   # Check what's using port 5002
+netstat -tulpn | grep 5002
    # Or use different port
    docker run -p 5001:5000 yt-dlp-api
    ```

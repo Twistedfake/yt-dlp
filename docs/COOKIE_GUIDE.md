@@ -114,7 +114,7 @@ python test_api_locally.py
 
 3. **Manual test with curl:**
 ```bash
-curl -X POST http://localhost:5000/info \
+curl -X POST http://localhost:5002/info \
   -H "Content-Type: application/json" \
   -d '{"url":"https://youtube.com/watch?v=dQw4w9WgXcQ","options":{"cookiesfrombrowser":"chrome"}}'
 ```
@@ -128,7 +128,7 @@ scp youtube_cookies.txt user@your-vps:/path/to/cookies/
 
 2. **Test with cookie file:**
 ```bash
-curl -X POST http://your-vps:5000/info \
+curl -X POST http://your-vps:5002/info \
   -H "Content-Type: application/json" \
   -d '{"url":"https://youtube.com/watch?v=dQw4w9WgXcQ","options":{"cookiefile":"/path/to/cookies/youtube_cookies.txt"}}'
 ```
