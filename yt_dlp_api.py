@@ -168,11 +168,16 @@ class YtDlpAPI:
             **opts
         }
         
-        # Handle cookiesfrombrowser properly - yt-dlp expects just the browser string
+        # Handle cookiesfrombrowser properly - yt-dlp expects tuple format
         cookiesfrombrowser = opts.get('cookiesfrombrowser')
         if cookiesfrombrowser:
-            # Pass the browser name directly as yt-dlp expects
-            enhanced_opts['cookiesfrombrowser'] = cookiesfrombrowser.lower()
+            # yt-dlp expects a tuple format: ("browser_name",)
+            if isinstance(cookiesfrombrowser, str):
+                enhanced_opts['cookiesfrombrowser'] = (cookiesfrombrowser.lower(),)
+            elif isinstance(cookiesfrombrowser, list) and cookiesfrombrowser:
+                enhanced_opts['cookiesfrombrowser'] = (cookiesfrombrowser[0].lower(),)
+            else:
+                enhanced_opts['cookiesfrombrowser'] = ('chrome',)  # fallback
         
         return enhanced_opts
         
