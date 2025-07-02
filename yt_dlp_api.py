@@ -107,6 +107,31 @@ class YtDlpAPI:
                     'quiet': True,
                     'no_warnings': True,
                     'simulate': True,  # Don't download
+                    
+                    # ── ANTI-BOT MEASURES FOR YOUTUBE ──
+                    # Use browser cookies to avoid bot detection
+                    'cookiesfrombrowser': opts.get('cookiesfrombrowser', ('chrome', None, None, None)),
+                    # Browser-like headers
+                    'user_agent': opts.get('user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+                    'referer': opts.get('referer', 'https://www.youtube.com/'),
+                    # Additional headers to appear more browser-like
+                    'http_headers': {
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                    },
+                    # Rate limiting to avoid detection
+                    'sleep_interval': opts.get('sleep_interval', 1),
+                    'max_sleep_interval': opts.get('max_sleep_interval', 3),
+                    # Cookie file support as fallback
+                    'cookiefile': opts.get('cookiefile', None),
+                    
                     **opts
                 }
                 
@@ -167,6 +192,31 @@ class YtDlpAPI:
                 ydl_opts = {
                     'quiet': True,
                     'no_warnings': True,
+                    
+                    # ── ANTI-BOT MEASURES FOR YOUTUBE ──
+                    # Use browser cookies to avoid bot detection
+                    'cookiesfrombrowser': opts.get('cookiesfrombrowser', ('chrome', None, None, None)),
+                    # Browser-like headers
+                    'user_agent': opts.get('user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+                    'referer': opts.get('referer', 'https://www.youtube.com/'),
+                    # Additional headers to appear more browser-like
+                    'http_headers': {
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                    },
+                    # Rate limiting to avoid detection
+                    'sleep_interval': opts.get('sleep_interval', 1),
+                    'max_sleep_interval': opts.get('max_sleep_interval', 3),
+                    # Cookie file support as fallback
+                    'cookiefile': opts.get('cookiefile', None),
+                    
                     # Disable all file writing to disk - we only want in-memory downloads
                     'writesubtitles': False,  # write_subs,
                     'writeautomaticsub': False,  # write_auto_subs,
@@ -329,6 +379,31 @@ class YtDlpAPI:
                 ydl_opts = {
                     'quiet': True,
                     'no_warnings': True,
+                    
+                    # ── ANTI-BOT MEASURES FOR YOUTUBE ──
+                    # Use browser cookies to avoid bot detection
+                    'cookiesfrombrowser': opts.get('cookiesfrombrowser', ('chrome', None, None, None)),
+                    # Browser-like headers
+                    'user_agent': opts.get('user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+                    'referer': opts.get('referer', 'https://www.youtube.com/'),
+                    # Additional headers to appear more browser-like
+                    'http_headers': {
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                    },
+                    # Rate limiting to avoid detection
+                    'sleep_interval': opts.get('sleep_interval', 1),
+                    'max_sleep_interval': opts.get('max_sleep_interval', 3),
+                    # Cookie file support as fallback
+                    'cookiefile': opts.get('cookiefile', None),
+                    
                     # Disable subtitle writing to disk - we only extract subtitle info
                     'writesubtitles': False,  # True,
                     'writeautomaticsub': False,  # True,
@@ -373,6 +448,31 @@ class YtDlpAPI:
                 ydl_opts = {
                     'quiet': True,
                     'no_warnings': True,
+                    
+                    # ── ANTI-BOT MEASURES FOR YOUTUBE ──
+                    # Use browser cookies to avoid bot detection
+                    'cookiesfrombrowser': opts.get('cookiesfrombrowser', ('chrome', None, None, None)),
+                    # Browser-like headers
+                    'user_agent': opts.get('user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+                    'referer': opts.get('referer', 'https://www.youtube.com/'),
+                    # Additional headers to appear more browser-like
+                    'http_headers': {
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                    },
+                    # Rate limiting to avoid detection
+                    'sleep_interval': opts.get('sleep_interval', 1),
+                    'max_sleep_interval': opts.get('max_sleep_interval', 3),
+                    # Cookie file support as fallback
+                    'cookiefile': opts.get('cookiefile', None),
+                    
                     'extract_flat': True,  # Only get URLs, don't download
                     **opts
                 }

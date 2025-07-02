@@ -9,7 +9,69 @@ Make sure your API server is running:
 python yt_dlp_api.py
 ```
 
-The server will be available at: `http://localhost:5000`
+The server will be available at: `http://localhost:5002` (updated port)
+
+---
+
+## 🍪 YouTube Bot Detection Bypass
+
+The API now includes **Chrome cookies support** to bypass YouTube's bot detection. All endpoints automatically use Chrome cookies when available.
+
+### Basic Chrome Cookies (Automatic)
+The API automatically uses Chrome cookies by default. No special configuration needed!
+
+### Custom Browser Cookies
+```bash
+# Use Firefox cookies instead
+curl -X POST http://localhost:5002/download \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "options": {
+      "cookiesfrombrowser": ["firefox", null, null, null]
+    }
+  }' \
+  --output rick_roll.mp4
+
+# Use Edge cookies
+curl -X POST http://localhost:5002/download \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "options": {
+      "cookiesfrombrowser": ["edge", null, null, null]
+    }
+  }' \
+  --output test_edge.mp4
+```
+
+### Cookie File Support
+```bash
+# Use exported cookie file
+curl -X POST http://localhost:5002/download \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "options": {
+      "cookiefile": "/path/to/cookies.txt"
+    }
+  }' \
+  --output test_cookies.mp4
+```
+
+### Custom User Agent
+```bash
+# Override user agent
+curl -X POST http://localhost:5002/download \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "options": {
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+  }' \
+  --output test_custom_ua.mp4
+```
 
 ---
 
@@ -27,7 +89,7 @@ https://www.youtube.com/shorts/yFLFkdFvNh0
 ### 1. 🔍 **Health Check**
 Test if the API server is running:
 ```bash
-curl -X GET http://localhost:5000/
+curl -X GET http://localhost:5002/
 ```
 
 **Expected Response:**
@@ -49,7 +111,7 @@ curl -X GET http://localhost:5000/
 ### 2. 📊 **Video Information Extraction**
 Get video metadata without downloading:
 ```bash
-curl -X POST http://localhost:5000/info \
+curl -X POST http://localhost:5002/info \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0"
@@ -62,7 +124,7 @@ curl -X POST http://localhost:5000/info \
 
 #### Basic MP3 Audio Download
 ```bash
-curl -X POST http://localhost:5000/download \
+curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
