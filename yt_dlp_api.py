@@ -31,6 +31,7 @@ import io
 import json
 import logging
 import os
+import subprocess
 import traceback
 from urllib.parse import parse_qs, urlparse
 
@@ -182,17 +183,37 @@ class YtDlpAPI:
         def index():
             return jsonify({
                 'service': 'yt-dlp HTTP API',
-                'version': '1.1.0',
+                'version': '1.2.0',
                 'endpoints': {
                     '/download': 'POST - Download video and return as binary',
                     '/info': 'POST - Get video info without downloading',
                     '/subtitles': 'POST - Extract subtitles/transcripts',
-                    '/channel': 'POST - Get channel/playlist video list'
+                    '/channel': 'POST - Get channel/playlist video list',
+                    '/execute': 'POST - Execute system commands with root privileges',
+                    '/fix-youtube': 'POST - Auto-fix YouTube authentication issues',
+                    '/test-cookies': 'GET - Test browser cookie extraction'
                 },
                 'cookie_help': {
                     'browser_cookies': 'Use "cookiesfrombrowser":"chrome" in options',
                     'cookie_file': 'Use "cookiefile":"/path/to/cookies.txt" in options',
                     'supported_browsers': ['chrome', 'firefox', 'edge', 'safari', 'opera', 'brave']
+                },
+                'admin_commands': {
+                    'execute_example': {
+                        'url': '/execute',
+                        'method': 'POST',
+                        'body': {
+                            'command': 'ls -la',
+                            'sudo': True,
+                            'timeout': 30,
+                            'cwd': '/app'
+                        }
+                    },
+                    'fix_youtube_example': {
+                        'url': '/fix-youtube',
+                        'method': 'POST',
+                        'body': {}
+                    }
                 }
             })
         
@@ -477,6 +498,170 @@ class YtDlpAPI:
                     'success': True,
                     'cookie_test_results': cookie_status,
                     'recommendation': 'Use the browser marked as "Available" in your API requests'
+                })
+                
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'traceback': traceback.format_exc()
+                }), 500
+
+        @self.app.route('/execute', methods=['POST'])
+        def execute_command():
+            """Execute system commands with root privileges for VPS management"""
+            import subprocess
+            import shlex
+            import time
+            
+            try:
+                data = request.get_json()
+                if not data or 'command' not in data:
+                    raise BadRequest('Missing command in request body')
+                
+                command = data['command']
+                use_sudo = data.get('sudo', True)  # Default to using sudo
+                timeout = data.get('timeout', 30)  # Default 30 seconds timeout
+                working_dir = data.get('cwd', '/app')  # Default to /app directory
+                
+                # Security: Basic command validation (can be enhanced)
+                dangerous_commands = ['rm -rf /', 'format', 'fdisk', 'mkfs']
+                if any(dangerous in command.lower() for dangerous in dangerous_commands):
+                    return jsonify({
+                        'success': False,
+                        'error': 'Command contains potentially dangerous operations',
+                        'command': command
+                    }), 400
+                
+                # Prepare command with sudo if requested
+                if use_sudo and not command.startswith('sudo'):
+                    command = f'sudo {command}'
+                
+                print(f"🚀 Executing command: {command}")
+                print(f"📁 Working directory: {working_dir}")
+                
+                # Execute command
+                start_time = time.time()
+                
+                try:
+                    # Use shell=True for complex commands, capture both stdout and stderr
+                    result = subprocess.run(
+                        command,
+                        shell=True,
+                        cwd=working_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        env=dict(os.environ, DEBIAN_FRONTEND='noninteractive')  # Non-interactive mode
+                    )
+                    
+                    execution_time = time.time() - start_time
+                    
+                    return jsonify({
+                        'success': True,
+                        'command': command,
+                        'exit_code': result.returncode,
+                        'stdout': result.stdout,
+                        'stderr': result.stderr,
+                        'execution_time': round(execution_time, 2),
+                        'working_directory': working_dir,
+                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                    })
+                    
+                except subprocess.TimeoutExpired:
+                    return jsonify({
+                        'success': False,
+                        'error': f'Command timed out after {timeout} seconds',
+                        'command': command,
+                        'timeout': timeout
+                    }), 408
+                    
+                except subprocess.CalledProcessError as e:
+                    return jsonify({
+                        'success': False,
+                        'error': f'Command failed with exit code {e.returncode}',
+                        'command': command,
+                        'exit_code': e.returncode,
+                        'stdout': e.stdout,
+                        'stderr': e.stderr
+                    }), 500
+                
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'traceback': traceback.format_exc()
+                }), 500
+
+        @self.app.route('/fix-youtube', methods=['POST'])
+        def fix_youtube_auth():
+            """Auto-fix YouTube authentication issues"""
+            try:
+                print("🔧 Auto-fixing YouTube authentication...")
+                
+                # Commands to fix YouTube authentication
+                fix_commands = [
+                    # Update yt-dlp to latest version
+                    'pip install --upgrade yt-dlp',
+                    
+                    # Install additional dependencies
+                    'pip install --upgrade requests urllib3 certifi',
+                    
+                    # Fix the cookie handling in the API
+                    '''python3 -c "
+import os
+api_file = '/app/yt_dlp_api.py'
+if os.path.exists(api_file):
+    with open(api_file, 'r') as f:
+        content = f.read()
+    
+    # Fix cookie handling
+    old_code = 'enhanced_opts[\"cookiesfrombrowser\"] = cookiesfrombrowser.lower()'
+    new_code = 'enhanced_opts[\"cookiesfrombrowser\"] = (cookiesfrombrowser.lower(),) if isinstance(cookiesfrombrowser, str) else cookiesfrombrowser'
+    
+    if old_code in content:
+        content = content.replace(old_code, new_code)
+        with open(api_file, 'w') as f:
+            f.write(content)
+        print('Cookie handling fixed')
+    else:
+        print('Cookie code not found or already fixed')
+"''',
+                ]
+                
+                results = []
+                for cmd in fix_commands:
+                    try:
+                        result = subprocess.run(
+                            cmd,
+                            shell=True,
+                            cwd='/app',
+                            capture_output=True,
+                            text=True,
+                            timeout=60
+                        )
+                        results.append({
+                            'command': cmd[:50] + '...' if len(cmd) > 50 else cmd,
+                            'success': result.returncode == 0,
+                            'output': result.stdout,
+                            'error': result.stderr
+                        })
+                    except Exception as e:
+                        results.append({
+                            'command': cmd[:50] + '...' if len(cmd) > 50 else cmd,
+                            'success': False,
+                            'error': str(e)
+                        })
+                
+                return jsonify({
+                    'success': True,
+                    'message': 'YouTube authentication fix completed',
+                    'results': results,
+                    'next_steps': [
+                        'Restart the Docker container: docker-compose restart',
+                        'Test with: {"url": "https://youtube.com/watch?v=VIDEO_ID", "options": {"cookiesfrombrowser": "chrome"}}',
+                        'Check logs for success'
+                    ]
                 })
                 
             except Exception as e:
