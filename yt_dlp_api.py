@@ -179,6 +179,17 @@ class YtDlpAPI:
             else:
                 enhanced_opts['cookiesfrombrowser'] = ('chrome',)  # fallback
         
+        # Handle cookies file parameter
+        cookies = opts.get('cookies')
+        if cookies:
+            # Convert cookies parameter to cookiefile path
+            if cookies.startswith('/'):
+                # Already full path
+                enhanced_opts['cookiefile'] = cookies
+            else:
+                # Relative to cookies directory
+                enhanced_opts['cookiefile'] = f'/app/cookies/{cookies}'
+        
         return enhanced_opts
         
     def setup_routes(self):
