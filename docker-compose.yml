@@ -16,12 +16,13 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-    # Optional: Mount Chrome profile for cookie access (uncomment if needed)
-     volumes:
+    volumes:
+      # Mount cookies directory for authentication
+      - ./cookies:/app/cookies:ro
+      # Optional: Mount Chrome profile for direct browser cookie access
       - ~/.config/google-chrome:/root/.config/google-chrome:ro
       - ~/.cache/google-chrome:/root/.cache/google-chrome:ro
     
-    # Optional: Add resource limits
     deploy:
       resources:
         limits:
