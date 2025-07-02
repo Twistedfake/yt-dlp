@@ -1,0 +1,61 @@
+# Core yt-dlp requirements
+yt-dlp>=2024.1.0
+requests>=2.31.0
+Flask>=2.3.0
+Werkzeug>=2.3.0
+
+# HTTP and networking
+urllib3>=1.26.0
+certifi>=2023.0.0
+brotli>=1.0.9
+websockets>=11.0.0
+
+# Async support for parallel downloads
+aiohttp>=3.8.0
+
+# Audio/video processing and metadata
+mutagen>=1.47.0  # For audio metadata extraction and manipulation
+pillow>=10.0.0   # For thumbnail and image processing
+ffmpeg-python>=0.2.0  # Python wrapper for FFmpeg
+imageio-ffmpeg>=0.6.0  # FFmpeg binaries for reliable media processing
+
+# Encryption and security
+pycryptodome>=3.19.0  # For encrypted content decryption
+cryptography>=41.0.0  # Additional crypto support
+
+# Subtitle and text processing
+pysubs2>=1.6.0  # For subtitle file handling
+chardet>=5.2.0  # Character encoding detection
+lxml>=4.9.0     # XML processing for various formats
+
+# System monitoring and performance
+psutil>=5.9.0
+
+# File handling and utilities
+pathlib2>=2.3.7  # For older Python versions compatibility
+typing-extensions>=4.8.0  # For better type hints
+packaging>=23.0  # For version parsing
+
+# Data processing and serialization
+pyyaml>=6.0.1   # YAML configuration files
+jsonschema>=4.19.0  # JSON schema validation
+
+# Development and testing dependencies
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+black>=23.9.0   # Code formatting
+flake8>=6.1.0   # Linting
+mypy>=1.6.0     # Type checking
+
+# Optional but recommended for production
+gunicorn>=21.2.0  # WSGI server for production deployment
+gevent>=23.9.0    # Async networking library
+
+# Platform-specific dependencies
+colorama>=0.4.6; sys_platform == "win32"  # Windows terminal colors
+
+# Additional useful packages for API functionality
+python-dateutil>=2.8.2  # Date parsing utilities
+tqdm>=4.66.0            # Progress bars
+click>=8.1.0            # CLI utilities 
