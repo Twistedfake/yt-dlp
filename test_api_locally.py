@@ -38,7 +38,7 @@ def test_api_endpoint(url, data=None, method='GET'):
         return None
 
 def main():
-    base_url = "http://localhost:5000"
+    base_url = "http://localhost:5002"
     
     print("🧪 Testing yt-dlp API with Cookie Authentication")
     print("=" * 50)
