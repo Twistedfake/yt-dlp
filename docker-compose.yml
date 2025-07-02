@@ -5,7 +5,7 @@ services:
     build: .
     container_name: yt-dlp-api
     ports:
-      - "5000:5000"
+      - "5002:5000"
     environment:
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
