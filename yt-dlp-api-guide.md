@@ -8,12 +8,21 @@
 | **Audio Only** | `"bestaudio[ext=m4a]/bestaudio"` | Best audio in M4A format |
 | **Video + Audio** | `"bestvideo[height=720][ext=mp4]+bestaudio[ext=m4a]/best"` | 720p video with audio combined |
 
+## Authentication
+
+All API requests require authentication using the `X-API-Key` header:
+
+```bash
+-H "X-API-Key: your_api_key"
+```
+
 ## Curl Examples
 
 ### 🎥 Video + Audio Download
 ```bash
 curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
     "format": "bestvideo[height=720][ext=mp4]+bestaudio[ext=m4a]/best"
@@ -24,6 +33,7 @@ curl -X POST http://localhost:5002/download \
 ```bash
 curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
     "format": "bestaudio[ext=m4a]/bestaudio"
@@ -34,6 +44,7 @@ curl -X POST http://localhost:5002/download \
 ```bash
 curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
     "format": "bestvideo[height=720][ext=mp4]"
@@ -62,6 +73,7 @@ curl -X POST http://localhost:5002/download \
 ```bash
 curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
   -d '{
     "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
     "format": "bestaudio",
@@ -87,6 +99,7 @@ curl -X POST http://localhost:5002/download \
 ```bash
 curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
   -d '{
     "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     "format": "best"
@@ -97,6 +110,7 @@ curl -X POST http://localhost:5002/download \
 ```bash
 curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
   -d '{
     "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     "format": "bestvideo[height>=2160]+bestaudio[abr>=192]/best"
@@ -107,6 +121,7 @@ curl -X POST http://localhost:5002/download \
 ```bash
 curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
   -d '{
     "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     "format": "bestvideo[height=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height=720]+bestaudio/best"
