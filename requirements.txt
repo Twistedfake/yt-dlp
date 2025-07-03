@@ -58,4 +58,7 @@ colorama>=0.4.6; sys_platform == "win32"  # Windows terminal colors
 # Additional useful packages for API functionality
 python-dateutil>=2.8.2  # Date parsing utilities
 tqdm>=4.66.0            # Progress bars
-click>=8.1.0            # CLI utilities 
+click>=8.1.0            # CLI utilities
+
+# Automated cookie management for YouTube authentication
+ytc>=1.0.0              # Automated YouTube cookie service 

@@ -65,6 +65,7 @@ class YtDlpAPI:
         self.app = Flask(__name__)
         self.cookie_dir = self._setup_cookie_directory()
         self._setup_auth()
+        self._auto_setup_cookies()  # Automatically handle cookie setup
         self.setup_routes()
     
     def _setup_auth(self):
@@ -136,6 +137,50 @@ class YtDlpAPI:
             raise RuntimeError("Could not create writable cookie directory")
         
         return cookie_dir
+
+    def _auto_setup_cookies(self):
+        """Automatically set up cookies on API startup"""
+        print("🔧 Auto-setting up cookies on startup...")
+        
+        # Copy any existing cookies to centralized location
+        cookie_sources = [
+            '/app/cookies/youtube_cookies.txt',
+            '/app/cookies/youtube-cookies.txt',
+            './cookies/youtube_cookies.txt',
+            './cookies/youtube-cookies.txt'
+        ]
+        
+        target = os.path.join(self.cookie_dir, 'cookies.txt')
+        
+        for source in cookie_sources:
+            if os.path.exists(source) and not os.path.exists(target):
+                try:
+                    import shutil
+                    shutil.copy2(source, target)
+                    print(f"✅ Auto-copied cookies from {source} to {target}")
+                    break
+                except Exception as e:
+                    print(f"⚠️ Could not auto-copy {source}: {e}")
+        
+        # Try to get fresh ytc cookies
+        try:
+            cookie_result = self._get_automated_cookies()
+            if cookie_result['success']:
+                print(f"✅ Auto-setup: {cookie_result['source']}")
+            else:
+                print(f"⚠️ Auto-setup: {cookie_result['error']}")
+        except Exception as e:
+            print(f"⚠️ Auto-setup ytc failed: {e}")
+        
+        # List what we have
+        try:
+            available_files = self.get_available_cookie_files()
+            if available_files:
+                print(f"✅ Cookie files available: {', '.join(available_files)}")
+            else:
+                print("⚠️ No cookie files found - YouTube may require manual authentication")
+        except Exception as e:
+            print(f"⚠️ Could not check cookie files: {e}")
 
     def _get_ffmpeg_location(self):
         """Auto-detect ffmpeg location on the system (cross-platform)"""

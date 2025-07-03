@@ -25,16 +25,92 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies including ytc for automated cookies
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir ytc
+
+# Create directories and set up permissions BEFORE switching to appuser
+RUN mkdir -p /app/YTC-DL /app/cookies && \
+    chmod 755 /app/YTC-DL /app/cookies
+
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash appuser
 
 # Copy application files
 COPY yt_dlp_api.py .
 COPY yt_dlp_memory_downloader.py .
 
-# Create non-root user for security
-RUN useradd --create-home --shell /bin/bash appuser && \
-    chown -R appuser:appuser /app
+# Create container initialization script
+COPY <<EOF /app/init_container.py
+#!/usr/bin/env python3
+"""
+Container initialization script to set up cookies and permissions
+This runs at container startup to ensure everything is configured correctly
+"""
+import os
+import shutil
+import time
+
+def setup_cookie_directories():
+    """Ensure cookie directories exist with proper permissions"""
+    directories = ['/app/YTC-DL', '/app/cookies']
+    for directory in directories:
+        os.makedirs(directory, exist_ok=True)
+        # Make sure appuser can write to these directories
+        try:
+            os.chmod(directory, 0o755)
+        except:
+            pass
+    print("✅ Cookie directories initialized")
+
+def copy_existing_cookies():
+    """Copy any existing cookies to centralized location"""
+    cookie_sources = [
+        '/app/cookies/youtube_cookies.txt',
+        '/app/cookies/youtube-cookies.txt',
+        '/app/cookies/cookies.txt'
+    ]
+    
+    target = '/app/YTC-DL/cookies.txt'
+    
+    for source in cookie_sources:
+        if os.path.exists(source) and not os.path.exists(target):
+            try:
+                shutil.copy2(source, target)
+                os.chmod(target, 0o644)
+                print(f"✅ Copied cookies from {source} to {target}")
+                break
+            except Exception as e:
+                print(f"⚠️ Could not copy {source}: {e}")
+
+def test_ytc_installation():
+    """Test if ytc library is working"""
+    try:
+        import ytc
+        print("✅ ytc library available for automated cookies")
+        return True
+    except ImportError as e:
+        print(f"⚠️ ytc library not available: {e}")
+        return False
+
+def main():
+    print("🚀 Initializing yt-dlp API container...")
+    setup_cookie_directories()
+    copy_existing_cookies()
+    test_ytc_installation()
+    print("✅ Container initialization complete!")
+
+if __name__ == '__main__':
+    main()
+EOF
+
+# Make initialization script executable
+RUN chmod +x /app/init_container.py
+
+# Change ownership of app directory to appuser
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
 USER appuser
 
 # Expose port
@@ -44,5 +120,17 @@ EXPOSE 5002
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:5002/ || exit 1
 
-# Run the application
-CMD ["python", "yt_dlp_api.py", "--host", "0.0.0.0", "--port", "5002"] 
+# Create startup script that runs initialization then starts the API
+COPY <<EOF /app/startup.sh
+#!/bin/bash
+# Run initialization
+python3 /app/init_container.py
+
+# Start the API
+exec python3 yt_dlp_api.py --host 0.0.0.0 --port 5002
+EOF
+
+RUN chmod +x /app/startup.sh
+
+# Run the startup script
+CMD ["/app/startup.sh"] 
