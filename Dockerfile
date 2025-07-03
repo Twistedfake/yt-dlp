@@ -111,8 +111,19 @@ if __name__ == '__main__':
     main()
 EOF
 
-# Make initialization script executable
-RUN chmod +x /app/init_container.py
+# Create startup script that runs initialization then starts the API
+COPY <<EOF /app/startup.sh
+#!/bin/bash
+# Run initialization
+python3 /app/init_container.py
+
+# Start the API
+exec python3 yt_dlp_api.py --host 0.0.0.0 --port 5002
+EOF
+
+# Make scripts executable BEFORE switching to non-root user
+RUN chmod +x /app/init_container.py && \
+    chmod +x /app/startup.sh
 
 # Change ownership of app directory to appuser
 RUN chown -R appuser:appuser /app
@@ -126,18 +137,6 @@ EXPOSE 5002
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:5002/ || exit 1
-
-# Create startup script that runs initialization then starts the API
-COPY <<EOF /app/startup.sh
-#!/bin/bash
-# Run initialization
-python3 /app/init_container.py
-
-# Start the API
-exec python3 yt_dlp_api.py --host 0.0.0.0 --port 5002
-EOF
-
-RUN chmod +x /app/startup.sh
 
 # Run the startup script
 CMD ["/app/startup.sh"] 
