@@ -171,13 +171,4 @@ If a format isn't available, yt-dlp will try the next option after `/`. Always i
 
 ## API Response
 
-The API will return information about the downloaded file:
-
-```json
-{
-  "status": "success",
-  "title": "Video Title",
-  "filename": "Video Title [VIDEO_ID].mp4",
-  "url": "https://example.com/download/link"
-}
-``` 
+The API will return video/audio in the response as binary
