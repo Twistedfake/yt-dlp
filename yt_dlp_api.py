@@ -49,6 +49,9 @@ import traceback
 from functools import wraps
 from urllib.parse import parse_qs, urlparse
 
+# Ensure FFmpeg is in PATH
+os.environ["PATH"] = "/usr/bin:" + os.environ.get("PATH", "")
+
 from flask import Flask, Response, jsonify, request
 from werkzeug.exceptions import BadRequest, Unauthorized
 import requests
@@ -252,9 +255,11 @@ class YtDlpAPI:
             'retries': 3,
             'fragment_retries': 3,
             'extractor_retries': 3,
-            'ignoreerrors': False,
+            'ignoreerrors': True,
             'geo_bypass': True,
             'nocheckcertificate': True,
+            'ffmpeg_location': 'ffmpeg',
+            'prefer_ffmpeg': True,
             **opts
         }
         
@@ -607,9 +612,6 @@ class YtDlpAPI:
                 extract_audio = opts.get('extractaudio', False)
                 audio_format = opts.get('audioformat', 'mp3')
                 
-                # Auto-detect ffmpeg location
-                ffmpeg_location = self._get_ffmpeg_location()
-                
                 # Use enhanced options with better anti-bot measures
                 ydl_opts = self._get_enhanced_ydl_opts(opts)
                 ydl_opts.update({
@@ -627,6 +629,9 @@ class YtDlpAPI:
                     'writedesktoplink': False,
                     # Don't use post-processors for memory downloads
                     'postprocessors': [],
+                    # Force FFmpeg settings
+                    'ffmpeg_location': 'ffmpeg',
+                    'prefer_ffmpeg': True,
                     **opts
                 })
                 
@@ -637,20 +642,6 @@ class YtDlpAPI:
                     ydl_opts['format'] = 'bestaudio/best'
                 else:
                     ydl_opts['format'] = 'best'
-                
-                # Set ffmpeg location if found (cross-platform)
-                if ffmpeg_location:
-                    if ffmpeg_location not in ['ffmpeg', 'ffmpeg.exe']:
-                        import platform
-                        ffmpeg_dir = os.path.dirname(ffmpeg_location)
-                        ffprobe_name = 'ffprobe.exe' if platform.system() == 'Windows' else 'ffprobe'
-                        ffprobe_location = os.path.join(ffmpeg_dir, ffprobe_name)
-                        if os.path.isfile(ffprobe_location):
-                            ydl_opts['ffmpeg_location'] = ffmpeg_dir
-                        else:
-                            ydl_opts['ffmpeg_location'] = ffmpeg_location
-                    else:
-                        ydl_opts['ffmpeg_location'] = ffmpeg_location
                 
                 # Custom YDL class that uses our memory downloader
                 class MemoryYDL(YoutubeDL):
