@@ -517,38 +517,77 @@ class YtDlpAPI:
         """Use yt-dlp's native tab handling to get different types of content"""
         all_entries = []
         
-        # yt-dlp automatically handles tab detection and URL normalization
-        # We can leverage different tab URLs to get specific content types
+        # Normalize channel URL to ensure proper format
+        base_url = channel_url.rstrip('/')
+        
+        # Handle different channel URL formats
+        if '@' in base_url:
+            # Handle @username format
+            channel_base = base_url
+        elif '/channel/' in base_url:
+            # Handle /channel/UC... format
+            channel_base = base_url
+        elif '/c/' in base_url:
+            # Handle /c/channelname format
+            channel_base = base_url
+        else:
+            # Fallback
+            channel_base = base_url
+            
+        # Build tab URLs based on video types
         tab_urls = []
         
         if 'regular' in video_types or 'all' in video_types:
-            # Let yt-dlp handle the main channel URL - it will redirect to appropriate content
-            tab_urls.append(channel_url)
+            # Add /videos for regular videos
+            tab_urls.append(f"{channel_base}/videos")
             
         if 'shorts' in video_types or 'all' in video_types:
-            # Append /shorts to get shorts content
-            base_url = channel_url.rstrip('/')
-            if '/videos' in base_url:
-                tab_urls.append(base_url.replace('/videos', '/shorts'))
-            else:
-                tab_urls.append(f"{base_url}/shorts")
+            # Add /shorts for shorts content
+            tab_urls.append(f"{channel_base}/shorts")
                 
         if 'streams' in video_types or 'all' in video_types:
-            # Append /streams to get live/stream content
-            base_url = channel_url.rstrip('/')
-            if '/videos' in base_url:
-                tab_urls.append(base_url.replace('/videos', '/streams'))
-            else:
-                tab_urls.append(f"{base_url}/streams")
+            # Add /streams for live/stream content
+            tab_urls.append(f"{channel_base}/streams")
         
-        # Extract from each tab URL and let yt-dlp handle the heavy lifting
+        # Extract from each tab URL with extract_flat for efficiency
         for tab_url in tab_urls:
             try:
-                with YoutubeDL(enhanced_opts) as ydl:
+                # Use extract_flat for efficiency but process entries properly
+                extraction_opts = enhanced_opts.copy()
+                extraction_opts.update({
+                    'extract_flat': True,  # Use extract_flat for speed
+                    'quiet': True,
+                    'no_warnings': True,
+                    'playlist_items': f'1-10',  # Limit to first 10 videos per tab for speed
+                })
+                
+                print(f"Extracting from: {tab_url}")
+                with YoutubeDL(extraction_opts) as ydl:
                     tab_info = ydl.extract_info(tab_url, download=False)
+                    
+                    # Debug: print what we got
+                    if tab_info:
+                        print(f"Got info type: {tab_info.get('_type', 'unknown')}")
+                        print(f"Got ID: {tab_info.get('id', 'N/A')}")
+                        if 'entries' in tab_info:
+                            print(f"Got {len(tab_info['entries'])} entries")
+                    
                     if tab_info and 'entries' in tab_info:
-                        entries = [e for e in tab_info['entries'] if e and 'id' in e]
+                        # Filter out None entries and ensure they have video IDs
+                        entries = []
+                        for entry in tab_info['entries']:
+                            if (entry and 
+                                'id' in entry and 
+                                entry['id'] and 
+                                not entry['id'].startswith('UC') and  # Skip channel IDs
+                                len(entry['id']) == 11):  # YouTube video IDs are 11 characters
+                                entries.append(entry)
                         all_entries.extend(entries)
+                        print(f"Found {len(entries)} valid videos from {tab_url}")
+                    elif tab_info and tab_info.get('id'):
+                        # Handle case where the tab itself is returned instead of entries
+                        # This can happen with some channel URLs
+                        print(f"Tab {tab_url} returned channel info instead of videos: {tab_info.get('id')}")
             except Exception as e:
                 # Some tabs might not exist, which is fine
                 print(f"Tab {tab_url} not available: {e}")
@@ -1509,8 +1548,8 @@ if os.path.exists(api_file):
                 try:
                     enhanced_opts = self._get_enhanced_ydl_opts(opts)
                     enhanced_opts.update({
-                        'extract_flat': True,
-                        'quiet': True
+                        'quiet': True,
+                        'no_warnings': True
                     })
                     
                     # Use yt-dlp's native tab system to get videos by type
@@ -1518,7 +1557,13 @@ if os.path.exists(api_file):
                     videos = all_videos[:max_videos]
                     
                     # Get channel metadata from the main channel URL
-                    with YoutubeDL(enhanced_opts) as ydl:
+                    metadata_opts = enhanced_opts.copy()
+                    metadata_opts.update({
+                        'extract_flat': True,  # Only for channel metadata, not videos
+                        'quiet': True
+                    })
+                    
+                    with YoutubeDL(metadata_opts) as ydl:
                         channel_info = ydl.extract_info(channel_url, download=False)
                         channel_title = channel_info.get('title', 'Unknown Channel')
                         normalized_url = channel_url  # yt-dlp handles normalization internally
