@@ -11,14 +11,20 @@ ENV FLASK_ENV=production
 WORKDIR /app
 
 # Install system dependencies including ffmpeg and Chrome
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    curl \
-    wget \
-    gnupg \
-    ca-certificates \
-    && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+# Fix GPG signature issues by updating package lists and using newer Chrome setup
+RUN apt-get clean && \
+    apt-get update --allow-releaseinfo-change && \
+    apt-get install -y \
+        ffmpeg \
+        curl \
+        wget \
+        gnupg \
+        ca-certificates \
+        apt-transport-https \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
     && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
