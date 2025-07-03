@@ -598,7 +598,7 @@ class YtDlpAPI:
         @self.app.route('/download', methods=['POST'])
         @self.require_auth
         def download_video():
-            """Download video and return as binary stream"""
+            """Download video and return as binary stream, optionally with transcription"""
             try:
                 data = request.get_json()
                 if not data or 'url' not in data:
@@ -607,6 +607,12 @@ class YtDlpAPI:
                 url = data['url']
                 opts = data.get('options', {})
                 format_selector = data.get('format', None)
+                
+                # Transcription parameters
+                should_transcribe = data.get('transcribe', False)
+                transcribe_model = data.get('transcribe_model', 'base')
+                transcribe_language = data.get('transcribe_language', None)
+                transcribe_format = data.get('transcribe_format', 'json')
                 
                 # Check if audio extraction is requested
                 extract_audio = opts.get('extractaudio', False)
@@ -713,7 +719,103 @@ class YtDlpAPI:
                     title = sanitize_filename(info.get('title', 'video'))
                     filename = f"{title}.{ext}"
                     
-                    # Return binary data as streaming response
+                    # Handle transcription if requested
+                    if should_transcribe:
+                        try:
+                            import whisper
+                            import tempfile
+                            
+                            # Load Whisper model
+                            model = whisper.load_model(transcribe_model)
+                            
+                            # Save video data to temporary file for transcription
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as temp_file:
+                                temp_file.write(video_data)
+                                temp_path = temp_file.name
+                            
+                            try:
+                                # Transcribe the file
+                                transcribe_options = {
+                                    'language': transcribe_language,
+                                    'task': 'transcribe'
+                                }
+                                result = model.transcribe(temp_path, **transcribe_options)
+                                
+                                # Return transcription based on format
+                                if transcribe_format == 'text':
+                                    return Response(
+                                        result['text'],
+                                        mimetype='text/plain',
+                                        headers={'Content-Disposition': f'attachment; filename="{title}_transcript.txt"'}
+                                    )
+                                elif transcribe_format == 'srt':
+                                    srt_content = self._whisper_to_srt(result['segments'])
+                                    return Response(
+                                        srt_content,
+                                        mimetype='text/plain',
+                                        headers={'Content-Disposition': f'attachment; filename="{title}_transcript.srt"'}
+                                    )
+                                elif transcribe_format == 'vtt':
+                                    vtt_content = self._whisper_to_vtt(result['segments'])
+                                    return Response(
+                                        vtt_content,
+                                        mimetype='text/vtt',
+                                        headers={'Content-Disposition': f'attachment; filename="{title}_transcript.vtt"'}
+                                    )
+                                elif transcribe_format == 'both':
+                                    # Return both video and transcript in JSON
+                                    import base64
+                                    return jsonify({
+                                        'success': True,
+                                        'title': title,
+                                        'duration': info.get('duration', 0),
+                                        'language': result.get('language', 'unknown'),
+                                        'transcription': {
+                                            'text': result['text'],
+                                            'segments': result['segments'],
+                                            'model_used': transcribe_model
+                                        },
+                                        'video': {
+                                            'filename': filename,
+                                            'format': ext,
+                                            'size': len(video_data),
+                                            'data': base64.b64encode(video_data).decode('utf-8')
+                                        },
+                                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                                    })
+                                else:  # json format (default)
+                                    return jsonify({
+                                        'success': True,
+                                        'title': title,
+                                        'duration': info.get('duration', 0),
+                                        'language': result.get('language', 'unknown'),
+                                        'text': result['text'],
+                                        'segments': result['segments'],
+                                        'model_used': transcribe_model,
+                                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                                    })
+                                    
+                            finally:
+                                # Clean up temp file
+                                try:
+                                    if os.path.exists(temp_path):
+                                        os.unlink(temp_path)
+                                except:
+                                    pass
+                                    
+                        except ImportError:
+                            return jsonify({
+                                'error': 'OpenAI Whisper not installed for transcription',
+                                'install_hint': 'Run: pip install openai-whisper'
+                            }), 500
+                        except Exception as e:
+                            return jsonify({
+                                'error': f'Transcription failed: {str(e)}',
+                                'video_downloaded': True,
+                                'video_size': len(video_data)
+                            }), 500
+                    
+                    # Return binary data as streaming response (when no transcription)
                     def generate():
                         chunk_size = 8192
                         for i in range(0, len(video_data), chunk_size):
@@ -1109,6 +1211,272 @@ if os.path.exists(api_file):
                     'status': 'error',
                     'traceback': traceback.format_exc()
                 }), 500
+
+        @self.app.route('/transcribe-file', methods=['POST'])
+        @self.require_auth
+        def transcribe_file():
+            """Transcribe audio/video from uploaded file using OpenAI Whisper"""
+            try:
+                # Check if file is uploaded
+                if 'file' not in request.files:
+                    return jsonify({'error': 'No file uploaded'}), 400
+                
+                file = request.files['file']
+                if file.filename == '':
+                    return jsonify({'error': 'No file selected'}), 400
+                
+                # Get parameters from form data
+                model_size = request.form.get('model', 'base')
+                language = request.form.get('language', None)
+                response_format = request.form.get('format', 'json')
+                
+                # Import Whisper (lazy import)
+                try:
+                    import whisper
+                except ImportError:
+                    return jsonify({
+                        'error': 'OpenAI Whisper not installed',
+                        'install_hint': 'Run: pip install openai-whisper'
+                    }), 500
+                
+                # Load Whisper model
+                try:
+                    model = whisper.load_model(model_size)
+                except Exception as e:
+                    return jsonify({
+                        'error': f'Failed to load Whisper model "{model_size}": {str(e)}',
+                        'available_models': ['tiny', 'base', 'small', 'medium', 'large']
+                    }), 500
+                
+                # Save uploaded file temporarily
+                import tempfile
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file.filename.split(".")[-1]}') as temp_file:
+                    file.save(temp_file.name)
+                    temp_path = temp_file.name
+                
+                try:
+                    # Whisper can handle MP4, MP3, WAV, etc. directly via FFmpeg
+                    transcribe_options = {
+                        'language': language,
+                        'task': 'transcribe'
+                    }
+                    
+                    result = model.transcribe(temp_path, **transcribe_options)
+                    
+                    # Format response based on requested format
+                    if response_format == 'text':
+                        return Response(
+                            result['text'],
+                            mimetype='text/plain',
+                            headers={'Content-Disposition': f'attachment; filename="{file.filename}_transcript.txt"'}
+                        )
+                    elif response_format == 'srt':
+                        srt_content = self._whisper_to_srt(result['segments'])
+                        return Response(
+                            srt_content,
+                            mimetype='text/plain',
+                            headers={'Content-Disposition': f'attachment; filename="{file.filename}_transcript.srt"'}
+                        )
+                    elif response_format == 'vtt':
+                        vtt_content = self._whisper_to_vtt(result['segments'])
+                        return Response(
+                            vtt_content,
+                            mimetype='text/vtt',
+                            headers={'Content-Disposition': f'attachment; filename="{file.filename}_transcript.vtt"'}
+                        )
+                    else:  # json format (default)
+                        return jsonify({
+                            'success': True,
+                            'filename': file.filename,
+                            'language': result.get('language', 'unknown'),
+                            'text': result['text'],
+                            'segments': result['segments'],
+                            'model_used': model_size,
+                            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                        })
+                
+                finally:
+                    # Clean up temporary file
+                    try:
+                        if os.path.exists(temp_path):
+                            os.unlink(temp_path)
+                    except:
+                        pass
+                        
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'traceback': traceback.format_exc()
+                }), 500
+
+        @self.app.route('/transcribe', methods=['POST'])
+        @self.require_auth
+        def transcribe_audio():
+            """Transcribe audio from video URL using OpenAI Whisper"""
+            try:
+                data = request.get_json(force=True)
+                if not data or 'url' not in data:
+                    return jsonify({'error': 'URL is required'}), 400
+                
+                url = data['url']
+                model_size = data.get('model', 'base')  # tiny, base, small, medium, large
+                language = data.get('language', None)  # auto-detect if None
+                response_format = data.get('format', 'json')  # json, text, srt, vtt
+                
+                # Import Whisper (lazy import to avoid startup errors if not installed)
+                try:
+                    import whisper
+                except ImportError:
+                    return jsonify({
+                        'error': 'OpenAI Whisper not installed',
+                        'install_hint': 'Run: pip install openai-whisper'
+                    }), 500
+                
+                # Load Whisper model
+                try:
+                    model = whisper.load_model(model_size)
+                except Exception as e:
+                    return jsonify({
+                        'error': f'Failed to load Whisper model "{model_size}": {str(e)}',
+                        'available_models': ['tiny', 'base', 'small', 'medium', 'large']
+                    }), 500
+                
+                # Extract audio using yt-dlp
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
+                    audio_path = temp_audio.name
+                
+                try:
+                    # Get enhanced yt-dlp options
+                    opts = data.get('options', {})
+                    enhanced_opts = self._get_enhanced_ydl_opts(opts)
+                    
+                    # Configure for audio extraction
+                    enhanced_opts.update({
+                        'format': 'bestaudio',
+                        'outtmpl': audio_path.replace('.wav', '.%(ext)s'),
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'wav',
+                            'preferredquality': '192',
+                        }]
+                    })
+                    
+                    # Download and extract audio
+                    with YoutubeDL(enhanced_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        title = info.get('title', 'Unknown')
+                        duration = info.get('duration', 0)
+                    
+                    # Find the actual audio file (yt-dlp might change extension)
+                    import glob
+                    audio_files = glob.glob(audio_path.replace('.wav', '.*'))
+                    if not audio_files:
+                        return jsonify({'error': 'Failed to extract audio'}), 500
+                    
+                    actual_audio_path = audio_files[0]
+                    
+                    # Transcribe with Whisper
+                    transcribe_options = {
+                        'language': language,
+                        'task': 'transcribe'
+                    }
+                    
+                    result = model.transcribe(actual_audio_path, **transcribe_options)
+                    
+                    # Format response based on requested format
+                    if response_format == 'text':
+                        return Response(
+                            result['text'],
+                            mimetype='text/plain',
+                            headers={'Content-Disposition': f'attachment; filename="{sanitize_filename(title)}_transcript.txt"'}
+                        )
+                    elif response_format == 'srt':
+                        # Convert to SRT format
+                        srt_content = self._whisper_to_srt(result['segments'])
+                        return Response(
+                            srt_content,
+                            mimetype='text/plain',
+                            headers={'Content-Disposition': f'attachment; filename="{sanitize_filename(title)}_transcript.srt"'}
+                        )
+                    elif response_format == 'vtt':
+                        # Convert to VTT format
+                        vtt_content = self._whisper_to_vtt(result['segments'])
+                        return Response(
+                            vtt_content,
+                            mimetype='text/vtt',
+                            headers={'Content-Disposition': f'attachment; filename="{sanitize_filename(title)}_transcript.vtt"'}
+                        )
+                    else:  # json format (default)
+                        return jsonify({
+                            'success': True,
+                            'title': title,
+                            'duration': duration,
+                            'language': result.get('language', 'unknown'),
+                            'text': result['text'],
+                            'segments': result['segments'],
+                            'model_used': model_size,
+                            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                        })
+                
+                finally:
+                    # Clean up temporary files
+                    try:
+                        if os.path.exists(audio_path):
+                            os.unlink(audio_path)
+                        for audio_file in glob.glob(audio_path.replace('.wav', '.*')):
+                            if os.path.exists(audio_file):
+                                os.unlink(audio_file)
+                    except:
+                        pass
+                        
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'traceback': traceback.format_exc()
+                }), 500
+
+    def _whisper_to_srt(self, segments):
+        """Convert Whisper segments to SRT subtitle format"""
+        srt_content = ""
+        for i, segment in enumerate(segments, 1):
+            start_time = self._seconds_to_srt_time(segment['start'])
+            end_time = self._seconds_to_srt_time(segment['end'])
+            text = segment['text'].strip()
+            
+            srt_content += f"{i}\n{start_time} --> {end_time}\n{text}\n\n"
+        
+        return srt_content
+
+    def _whisper_to_vtt(self, segments):
+        """Convert Whisper segments to VTT subtitle format"""
+        vtt_content = "WEBVTT\n\n"
+        for segment in segments:
+            start_time = self._seconds_to_vtt_time(segment['start'])
+            end_time = self._seconds_to_vtt_time(segment['end'])
+            text = segment['text'].strip()
+            
+            vtt_content += f"{start_time} --> {end_time}\n{text}\n\n"
+        
+        return vtt_content
+
+    def _seconds_to_srt_time(self, seconds):
+        """Convert seconds to SRT time format (HH:MM:SS,mmm)"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millisecs = int((seconds % 1) * 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{millisecs:03d}"
+
+    def _seconds_to_vtt_time(self, seconds):
+        """Convert seconds to VTT time format (HH:MM:SS.mmm)"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millisecs = int((seconds % 1) * 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millisecs:03d}"
 
     def run(self, host='0.0.0.0', port=5002, debug=False):
         """Run the Flask server"""

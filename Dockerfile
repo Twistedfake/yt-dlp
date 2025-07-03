@@ -21,6 +21,8 @@ RUN apt-get clean && \
         gnupg \
         ca-certificates \
         apt-transport-https \
+        git \
+        build-essential \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
@@ -32,9 +34,10 @@ RUN apt-get clean && \
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies including ytc for automated cookies
+# Install Python dependencies including ytc for automated cookies and Whisper
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir ytc
+    pip install --no-cache-dir ytc && \
+    pip install --no-cache-dir openai-whisper
 
 # Create directories and set up permissions BEFORE switching to appuser
 RUN mkdir -p /app/YTC-DL /app/cookies && \
