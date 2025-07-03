@@ -512,6 +512,59 @@ class YtDlpAPI:
             return sorted(cookie_files)
         except Exception:
             return []
+    
+    def _get_channel_entries_by_type(self, enhanced_opts, channel_url, video_types):
+        """Use yt-dlp's native tab handling to get different types of content"""
+        all_entries = []
+        
+        # yt-dlp automatically handles tab detection and URL normalization
+        # We can leverage different tab URLs to get specific content types
+        tab_urls = []
+        
+        if 'regular' in video_types or 'all' in video_types:
+            # Let yt-dlp handle the main channel URL - it will redirect to appropriate content
+            tab_urls.append(channel_url)
+            
+        if 'shorts' in video_types or 'all' in video_types:
+            # Append /shorts to get shorts content
+            base_url = channel_url.rstrip('/')
+            if '/videos' in base_url:
+                tab_urls.append(base_url.replace('/videos', '/shorts'))
+            else:
+                tab_urls.append(f"{base_url}/shorts")
+                
+        if 'streams' in video_types or 'all' in video_types:
+            # Append /streams to get live/stream content
+            base_url = channel_url.rstrip('/')
+            if '/videos' in base_url:
+                tab_urls.append(base_url.replace('/videos', '/streams'))
+            else:
+                tab_urls.append(f"{base_url}/streams")
+        
+        # Extract from each tab URL and let yt-dlp handle the heavy lifting
+        for tab_url in tab_urls:
+            try:
+                with YoutubeDL(enhanced_opts) as ydl:
+                    tab_info = ydl.extract_info(tab_url, download=False)
+                    if tab_info and 'entries' in tab_info:
+                        entries = [e for e in tab_info['entries'] if e and 'id' in e]
+                        all_entries.extend(entries)
+            except Exception as e:
+                # Some tabs might not exist, which is fine
+                print(f"Tab {tab_url} not available: {e}")
+                continue
+        
+        # Remove duplicates based on video ID
+        seen_ids = set()
+        unique_entries = []
+        for entry in all_entries:
+            if entry['id'] not in seen_ids:
+                seen_ids.add(entry['id'])
+                unique_entries.append(entry)
+                
+        return unique_entries
+    
+
         
     def setup_routes(self):
         """Setup Flask routes"""
@@ -537,6 +590,7 @@ class YtDlpAPI:
                     '/health': 'GET - Health check (public)',
                     '/download': 'POST - Download video and return as binary (protected)',
                     '/info': 'POST - Get video info without downloading (protected)',
+                    '/channel': 'POST - Get channel info and optionally download/transcribe videos (protected)',
                     '/execute': 'POST - Execute system commands (protected)',
                     '/cookie-status': 'GET - Get comprehensive cookie status (protected)',
                     '/refresh-ytc-cookies': 'POST - Force refresh of ytc cookies (protected)',
@@ -559,24 +613,52 @@ class YtDlpAPI:
                     'supported_browsers': ['chrome', 'firefox', 'edge', 'safari', 'opera', 'brave']
                 },
                 'usage_examples': {
-                    'download_with_api_key': {
+                    'download_video': {
                         'url': '/download',
                         'method': 'POST',
                         'headers': {'X-API-Key': 'your-api-key'},
                         'body': {
                             'url': 'https://youtube.com/watch?v=VIDEO_ID',
+                            'transcribe': True,
+                            'transcribe_format': 'json',
                             'options': {'cookiesfrombrowser': 'chrome'}
                         }
                     },
-                    'download_with_bearer_token': {
-                        'url': '/download',
+                    'channel_info_only': {
+                        'url': '/channel',
+                        'method': 'POST',
+                        'headers': {'X-API-Key': 'your-api-key'},
+                        'body': {
+                            'url': 'https://youtube.com/@channel_name',
+                            'max_videos': 10,
+                            'video_types': ['regular']
+                        }
+                    },
+                    'channel_download_and_transcribe': {
+                        'url': '/channel',
                         'method': 'POST',
                         'headers': {'Authorization': 'Bearer your-api-key'},
                         'body': {
-                            'url': 'https://youtube.com/watch?v=VIDEO_ID',
+                            'url': 'https://youtube.com/@channel_name',
+                            'max_videos': 5,
+                            'video_types': ['regular', 'shorts'],
+                            'download': True,
+                            'transcribe': True,
+                            'transcribe_model': 'base',
+                            'transcribe_format': 'json',
                             'options': {'cookiefile': '/path/to/cookies.txt'}
                         }
                     }
+                },
+                'channel_endpoint_details': {
+                    'default_behavior': 'Returns channel info and video metadata only (no download)',
+                    'max_videos': 10,
+                    'video_types': ['regular', 'shorts', 'streams', 'all'],
+                    'download': 'Set to true to download videos as base64 data',
+                    'transcribe': 'Set to true to transcribe videos using OpenAI Whisper',
+                    'transcribe_models': ['tiny', 'base', 'small', 'medium', 'large'],
+                    'transcribe_formats': ['json', 'text', 'srt', 'vtt'],
+                    'note': 'Multiple videos returned in single response when download=true'
                 }
             })
         
@@ -1406,26 +1488,40 @@ if os.path.exists(api_file):
 
         @self.app.route('/channel', methods=['POST'])
         @self.require_auth
-        def start_channel_download():
-            """Start a channel download job and return job_id immediately"""
+        def get_channel_info():
+            """Get channel information and optionally download/transcribe videos"""
             try:
                 data = request.get_json(force=True)
                 if not data or 'url' not in data:
                     return jsonify({'error': 'Channel URL is required'}), 400
                 
+                # Parameters
                 channel_url = data['url']
+                max_videos = data.get('max_videos', 10)
+                video_types = data.get('video_types', ['regular'])  # regular, shorts, streams, all
+                should_download = data.get('download', False)
+                should_transcribe = data.get('transcribe', False)
+                transcribe_model = data.get('transcribe_model', 'base')
+                transcribe_format = data.get('transcribe_format', 'json')
+                opts = data.get('options', {})
                 
-                # Get channel info first to determine total videos
+                # Get channel info and videos using yt-dlp's native tab handling
                 try:
-                    with YoutubeDL({'extract_flat': True, 'quiet': True}) as ydl:
+                    enhanced_opts = self._get_enhanced_ydl_opts(opts)
+                    enhanced_opts.update({
+                        'extract_flat': True,
+                        'quiet': True
+                    })
+                    
+                    # Use yt-dlp's native tab system to get videos by type
+                    all_videos = self._get_channel_entries_by_type(enhanced_opts, channel_url, video_types)
+                    videos = all_videos[:max_videos]
+                    
+                    # Get channel metadata from the main channel URL
+                    with YoutubeDL(enhanced_opts) as ydl:
                         channel_info = ydl.extract_info(channel_url, download=False)
-                        
-                        if not channel_info or 'entries' not in channel_info:
-                            return jsonify({'error': 'Could not extract channel videos'}), 400
-                        
-                        max_videos = data.get('max_videos', 10)
-                        videos = list(channel_info['entries'])[:max_videos]
                         channel_title = channel_info.get('title', 'Unknown Channel')
+                        normalized_url = channel_url  # yt-dlp handles normalization internally
                         
                 except Exception as e:
                     return jsonify({
@@ -1433,49 +1529,58 @@ if os.path.exists(api_file):
                         'help': 'Make sure the URL is a valid YouTube channel'
                     }), 400
                 
-                # Create job
-                job_id = self.create_job(
-                    job_type='channel',
-                    total_items=len(videos),
-                    channel_url=channel_url,
-                    channel_title=channel_title,
-                    request_data=data
-                )
+                # Prepare response
+                response_data = {
+                    'success': True,
+                    'channel_title': channel_title,
+                    'channel_url': normalized_url,
+                    'total_videos_found': len(all_videos),
+                    'returned_videos': len(videos),
+                    'video_types_filter': video_types,
+                    'videos': []
+                }
                 
-                # Start background processing
-                def process_channel():
-                    try:
-                        self.update_job(job_id, status='running', current_item='Starting download...')
+                # If only info is requested (no download/transcribe)
+                if not should_download and not should_transcribe:
+                    for video in videos:
+                        video_info = {
+                            'id': video['id'],
+                            'title': video.get('title', 'Unknown Title'),
+                            'url': f"https://www.youtube.com/watch?v={video['id']}",
+                            'duration': video.get('duration', 0),
+                            'upload_date': video.get('upload_date', ''),
+                            'view_count': video.get('view_count', 0),
+                            'uploader': video.get('uploader', channel_title)
+                        }
+                        response_data['videos'].append(video_info)
+                    
+                    return jsonify(response_data)
+                
+                # If download or transcribe is requested
+                if should_download or should_transcribe:
+                    downloaded_videos = []
+                    transcriptions = []
+                    
+                    for i, video in enumerate(videos):
+                        video_url = f"https://www.youtube.com/watch?v={video['id']}"
+                        video_title = video.get('title', 'Unknown Title')
                         
-                        # VPS-optimized defaults
-                        max_workers = min(data.get('max_workers', 2), 3)
-                        batch_size = min(data.get('batch_size', 3), 5)
-                        transcribe = data.get('transcribe', False)
-                        transcribe_model = data.get('transcribe_model', 'tiny')
-                        transcribe_format = data.get('transcribe_format', 'json')
-                        format_selector = data.get('format', 'bestaudio[filesize<50M]/best[filesize<50M]')
-                        delay_between_videos = max(data.get('delay', 2.0), 1.0)
-                        
-                        def download_single_video(video_info):
-                            """Download a single video with error handling"""
-                            try:
-                                video_url = f"https://www.youtube.com/watch?v={video_info['id']}"
-                                video_title = video_info.get('title', 'Unknown Title')
-                                
-                                self.update_job(job_id, current_item=f"Downloading: {video_title[:50]}...")
-                                
-                                # Memory check and cleanup
-                                import psutil
-                                memory = psutil.virtual_memory()
-                                if memory.percent > 95:
-                                    import gc
-                                    gc.collect()
-                                
-                                # Prepare download options
-                                opts = data.get('options', {})
-                                enhanced_opts = self._get_enhanced_ydl_opts(opts)
-                                enhanced_opts.update({
-                                    'format': format_selector,
+                        try:
+                            video_result = {
+                                'id': video['id'],
+                                'title': video_title,
+                                'url': video_url,
+                                'duration': video.get('duration', 0),
+                                'upload_date': video.get('upload_date', ''),
+                                'success': True
+                            }
+                            
+                            # Download video if requested
+                            if should_download:
+                                # Configure download options
+                                download_opts = self._get_enhanced_ydl_opts(opts)
+                                download_opts.update({
+                                    'format': data.get('format', 'best[filesize<50M]'),
                                     'writesubtitles': False,
                                     'writeautomaticsub': False,
                                     'writethumbnail': False,
@@ -1484,7 +1589,7 @@ if os.path.exists(api_file):
                                     'quiet': True
                                 })
                                 
-                                # Download video to memory
+                                # Download to memory
                                 from yt_dlp_memory_downloader import MemoryHttpFD
                                 
                                 class MemoryYDL(YoutubeDL):
@@ -1501,7 +1606,7 @@ if os.path.exists(api_file):
                                 
                                 start_time = time.time()
                                 
-                                with MemoryYDL(enhanced_opts) as ydl:
+                                with MemoryYDL(download_opts) as ydl:
                                     info = ydl.extract_info(video_url, download=True)
                                     
                                     if not ydl.memory_downloader:
@@ -1515,21 +1620,18 @@ if os.path.exists(api_file):
                                 download_time = time.time() - start_time
                                 file_size = len(video_data)
                                 
-                                result = {
-                                    'url': video_url,
-                                    'title': video_title,
-                                    'success': True,
+                                # Store video data as base64 for JSON response
+                                import base64
+                                video_result.update({
                                     'file_size': file_size,
                                     'download_time': round(download_time, 2),
                                     'format': info.get('ext', 'unknown'),
-                                    'video_data': video_data  # Keep in memory for now
-                                }
+                                    'video_data': base64.b64encode(video_data).decode('utf-8')
+                                })
                                 
-                                # Add transcription if requested
-                                if transcribe:
+                                # Transcribe if requested
+                                if should_transcribe:
                                     try:
-                                        self.update_job(job_id, current_item=f"Transcribing: {video_title[:50]}...")
-                                        
                                         import whisper
                                         import tempfile
                                         
@@ -1541,19 +1643,26 @@ if os.path.exists(api_file):
                                         
                                         try:
                                             transcribe_start = time.time()
-                                            whisper_result = model.transcribe(temp_path, language=data.get('language'))
+                                            whisper_result = model.transcribe(temp_path, language=data.get('transcribe_language'))
                                             transcribe_time = time.time() - transcribe_start
                                             
                                             if transcribe_format == 'text':
-                                                result['transcription'] = whisper_result['text']
+                                                transcription = whisper_result['text']
                                             else:
-                                                result['transcription'] = {
+                                                transcription = {
                                                     'text': whisper_result['text'],
                                                     'language': whisper_result.get('language', 'unknown'),
                                                     'segments': whisper_result['segments'] if transcribe_format == 'json' else len(whisper_result['segments']),
                                                     'model_used': transcribe_model,
                                                     'transcribe_time': round(transcribe_time, 2)
                                                 }
+                                            
+                                            video_result['transcription'] = transcription
+                                            transcriptions.append({
+                                                'video_title': video_title,
+                                                'video_url': video_url,
+                                                'transcription': transcription
+                                            })
                                         finally:
                                             try:
                                                 os.unlink(temp_path)
@@ -1561,74 +1670,89 @@ if os.path.exists(api_file):
                                                 pass
                                                 
                                     except ImportError:
-                                        result['transcription_error'] = 'Whisper not installed'
+                                        video_result['transcription_error'] = 'Whisper not installed'
                                     except Exception as e:
-                                        result['transcription_error'] = str(e)
-                                
-                                time.sleep(delay_between_videos)
-                                return result
-                                
-                            except Exception as e:
-                                return {
-                                    'url': f"https://www.youtube.com/watch?v={video_info['id']}",
-                                    'title': video_info.get('title', 'Unknown Title'),
-                                    'success': False,
-                                    'error': str(e)
-                                }
-                        
-                        # Process videos in batches
-                        from concurrent.futures import ThreadPoolExecutor, as_completed
-                        
-                        for i in range(0, len(videos), batch_size):
-                            batch = videos[i:i + batch_size]
-                            batch_num = (i // batch_size) + 1
-                            total_batches = (len(videos) + batch_size - 1) // batch_size
+                                        video_result['transcription_error'] = str(e)
                             
-                            self.update_job(job_id, current_item=f"Processing batch {batch_num}/{total_batches}")
-                            
-                            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                                future_to_video = {executor.submit(download_single_video, video): video for video in batch}
+                            # Only transcribe without download
+                            elif should_transcribe:
+                                # Extract audio for transcription
+                                audio_opts = self._get_enhanced_ydl_opts(opts)
+                                audio_opts.update({
+                                    'format': 'bestaudio',
+                                    'quiet': True
+                                })
                                 
-                                for future in as_completed(future_to_video):
-                                    result = future.result()
-                                    self.add_job_result(job_id, result)
+                                import tempfile
+                                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
+                                    audio_path = temp_audio.name
+                                
+                                try:
+                                    audio_opts['outtmpl'] = audio_path.replace('.wav', '.%(ext)s')
+                                    audio_opts['postprocessors'] = [{
+                                        'key': 'FFmpegExtractAudio',
+                                        'preferredcodec': 'wav',
+                                        'preferredquality': '192',
+                                    }]
+                                    
+                                    with YoutubeDL(audio_opts) as ydl:
+                                        ydl.download([video_url])
+                                    
+                                    # Find extracted audio file
+                                    import glob
+                                    audio_files = glob.glob(audio_path.replace('.wav', '.*'))
+                                    if audio_files:
+                                        actual_audio_path = audio_files[0]
+                                        
+                                        # Transcribe
+                                        import whisper
+                                        model = whisper.load_model(transcribe_model)
+                                        
+                                        transcribe_start = time.time()
+                                        whisper_result = model.transcribe(actual_audio_path, language=data.get('transcribe_language'))
+                                        transcribe_time = time.time() - transcribe_start
+                                        
+                                        if transcribe_format == 'text':
+                                            transcription = whisper_result['text']
+                                        else:
+                                            transcription = {
+                                                'text': whisper_result['text'],
+                                                'language': whisper_result.get('language', 'unknown'),
+                                                'segments': whisper_result['segments'] if transcribe_format == 'json' else len(whisper_result['segments']),
+                                                'model_used': transcribe_model,
+                                                'transcribe_time': round(transcribe_time, 2)
+                                            }
+                                        
+                                        video_result['transcription'] = transcription
+                                        transcriptions.append({
+                                            'video_title': video_title,
+                                            'video_url': video_url,
+                                            'transcription': transcription
+                                        })
+                                finally:
+                                    # Clean up audio files
+                                    try:
+                                        for audio_file in glob.glob(audio_path.replace('.wav', '.*')):
+                                            if os.path.exists(audio_file):
+                                                os.unlink(audio_file)
+                                    except:
+                                        pass
                             
-                            # Cleanup between batches
-                            if i + batch_size < len(videos):
-                                import gc
-                                gc.collect()
-                                time.sleep(3)
-                        
-                        # Final cleanup
-                        import gc
-                        gc.collect()
-                        
-                        self.update_job(job_id, 
-                                      status='completed', 
-                                      current_item='Download completed',
-                                      completed_at=datetime.now().isoformat())
-                        
-                    except Exception as e:
-                        self.update_job(job_id, 
-                                      status='failed', 
-                                      error=str(e),
-                                      current_item='Failed')
-                
-                # Start background thread
-                import threading
-                thread = threading.Thread(target=process_channel)
-                thread.daemon = True
-                thread.start()
-                
-                return jsonify({
-                    'success': True,
-                    'job_id': job_id,
-                    'message': 'Channel download started',
-                    'channel_title': channel_title,
-                    'total_videos': len(videos),
-                    'status_url': f'/job/{job_id}',
-                    'estimated_time': f'{len(videos) * 10} seconds'
-                })
+                            downloaded_videos.append(video_result)
+                            
+                        except Exception as e:
+                            video_result.update({
+                                'success': False,
+                                'error': str(e)
+                            })
+                            downloaded_videos.append(video_result)
+                    
+                    response_data['videos'] = downloaded_videos
+                    if transcriptions:
+                        response_data['transcriptions'] = transcriptions
+                        response_data['total_transcriptions'] = len(transcriptions)
+                    
+                    return jsonify(response_data)
                 
             except Exception as e:
                 return jsonify({
