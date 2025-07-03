@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 """
-yt-dlp HTTP API Server
+yt-dlp HTTP API Server with Authentication
 Provides an HTTP API that returns video content as binary data instead of saving to disk.
+
+AUTHENTICATION:
+Set environment variable for API access:
+- API_KEY: API key authentication (required for production)
+- If not set, API will run without authentication (development only)
+
+USAGE WITH AUTH:
+export API_KEY="your-secret-api-key"
+curl -H "X-API-Key: your-secret-api-key" http://localhost:5002/download
+# OR
+curl -H "Authorization: Bearer your-secret-api-key" http://localhost:5002/download
 
 COOKIE AUTHENTICATION FOR YOUTUBE:
 YouTube increasingly requires authentication to avoid bot detection. Use one of these methods:
@@ -24,19 +35,23 @@ METHOD 2 - Cookie File (Recommended for VPS):
 }
 
 TESTING LOCALLY:
-python yt_dlp_api_fixed.py --debug
+python yt_dlp_api.py --debug
 """
 
 import io
 import json
 import logging
 import os
+import shutil
 import subprocess
+import time
 import traceback
+from functools import wraps
 from urllib.parse import parse_qs, urlparse
 
 from flask import Flask, Response, jsonify, request
-from werkzeug.exceptions import BadRequest
+from werkzeug.exceptions import BadRequest, Unauthorized
+import requests
 
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import sanitize_filename
@@ -44,12 +59,84 @@ from yt_dlp_memory_downloader import MemoryHttpFD
 
 
 class YtDlpAPI:
-    """HTTP API wrapper for yt-dlp that returns binary content"""
+    """HTTP API wrapper for yt-dlp that returns binary content with authentication"""
     
     def __init__(self):
         self.app = Flask(__name__)
+        self.cookie_dir = self._setup_cookie_directory()
+        self._setup_auth()
         self.setup_routes()
     
+    def _setup_auth(self):
+        """Setup authentication based on environment variables"""
+        self.api_key = os.getenv('API_KEY')
+
+        
+        # Determine auth mode
+        if self.api_key:
+            self.auth_mode = 'api_key'
+            print(f"🔐 Authentication: API Key (key: {self.api_key[:4]}***)")
+        else:
+            self.auth_mode = 'none'
+            print("⚠️ WARNING: No authentication configured! Set API_KEY environment variable")
+    
+    def require_auth(self, f):
+        """Decorator to require authentication for endpoints"""
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if self.auth_mode == 'none':
+                # No auth configured, allow access
+                return f(*args, **kwargs)
+            
+            if self.auth_mode == 'api_key':
+                # Check for API key in headers
+                provided_key = request.headers.get('X-API-Key') or request.headers.get('Authorization', '').replace('Bearer ', '')
+                if not provided_key or provided_key != self.api_key:
+                    return jsonify({
+                        'error': 'Invalid or missing API key',
+                        'auth_method': 'api_key',
+                        'hint': 'Include X-API-Key header or Authorization: Bearer <key>'
+                    }), 401
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    
+    def _setup_cookie_directory(self):
+        """Setup centralized cookie directory for both ytc and manual cookies"""
+        import os
+        
+        # Use YTC-DL directory as the primary cookie location for consistency
+        ytc_dl_dir = os.path.join(os.getcwd(), 'YTC-DL')
+        
+        # Determine the best cookie directory location with YTC-DL as priority
+        possible_dirs = [
+            ytc_dl_dir,               # YTC-DL directory (highest priority)
+            '/app/cookies',           # Docker/VPS standard
+            './cookies',              # Local development
+            os.path.expanduser('~/.yt-dlp/cookies'),  # User home directory
+            '/tmp/yt-dlp-cookies'     # Fallback temp directory
+        ]
+        
+        cookie_dir = None
+        for dir_path in possible_dirs:
+            try:
+                os.makedirs(dir_path, exist_ok=True)
+                # Test write permissions
+                test_file = os.path.join(dir_path, '.test_write')
+                with open(test_file, 'w') as f:
+                    f.write('test')
+                os.remove(test_file)
+                cookie_dir = dir_path
+                print(f"🍪 Cookie directory: {cookie_dir}")
+                break
+            except (OSError, PermissionError):
+                continue
+        
+        if not cookie_dir:
+            raise RuntimeError("Could not create writable cookie directory")
+        
+        return cookie_dir
+
     def _get_ffmpeg_location(self):
         """Auto-detect ffmpeg location on the system (cross-platform)"""
         import os
@@ -104,136 +191,287 @@ class YtDlpAPI:
         return None
 
     def _get_enhanced_ydl_opts(self, opts=None):
-        """Get enhanced yt-dlp options with robust anti-bot measures (cross-platform)"""
-        import platform
-        
+        """Get enhanced yt-dlp options with better anti-bot measures and automated cookies"""
         if opts is None:
             opts = {}
         
-        # Detect platform for realistic headers
-        system = platform.system()
-        if system == 'Windows':
-            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
-            platform_header = '"Windows"'
-        elif system == 'Darwin':  # macOS
-            user_agent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
-            platform_header = '"macOS"'
-        else:  # Linux and others
-            user_agent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
-            platform_header = '"Linux"'
-            
-        # Enhanced anti-bot configuration
         enhanced_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            
-            # ── ENHANCED ANTI-BOT MEASURES FOR YOUTUBE ──
-            # Cookie authentication (primary defense)
-            'cookiefile': opts.get('cookiefile', None),
-            
-            # More sophisticated browser simulation (platform-aware)
-            'user_agent': opts.get('user_agent', user_agent),
-            'referer': opts.get('referer', 'https://www.youtube.com/'),
-            
-            # Comprehensive browser-like headers (platform-aware)
-            'http_headers': {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br, zstd',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="121", "Google Chrome";v="121"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': platform_header,
-                **opts.get('http_headers', {})
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'extractor_args': {
+                'youtube': {
+                    'skip': ['hls', 'dash'],
+                    'player_skip': ['configs'],
+                }
             },
-            
-            # Aggressive rate limiting to avoid detection
-            'sleep_interval': opts.get('sleep_interval', 2),  # Increased from 1
-            'max_sleep_interval': opts.get('max_sleep_interval', 5),  # Increased from 3
-            'sleep_interval_requests': opts.get('sleep_interval_requests', 1),  # New
-            
-            # YouTube-specific client selection
-            'youtube_client': opts.get('youtube_client', 'web'),  # Use web client
-            
-            # Network configuration
-            'socket_timeout': opts.get('socket_timeout', 30),
-            'retries': opts.get('retries', 3),
-            
+            'http_chunk_size': 10485760,
+            'retries': 3,
+            'fragment_retries': 3,
+            'extractor_retries': 3,
+            'ignoreerrors': False,
+            'geo_bypass': True,
+            'nocheckcertificate': True,
             **opts
         }
         
-        # Handle cookiesfrombrowser properly - yt-dlp expects tuple format
-        cookiesfrombrowser = opts.get('cookiesfrombrowser')
-        if cookiesfrombrowser:
-            # yt-dlp expects a tuple format: ("browser_name",)
-            if isinstance(cookiesfrombrowser, str):
-                enhanced_opts['cookiesfrombrowser'] = (cookiesfrombrowser.lower(),)
-            elif isinstance(cookiesfrombrowser, list) and cookiesfrombrowser:
-                enhanced_opts['cookiesfrombrowser'] = (cookiesfrombrowser[0].lower(),)
-            else:
-                enhanced_opts['cookiesfrombrowser'] = ('chrome',)  # fallback
-        
-        # Handle cookies file parameter
-        cookies = opts.get('cookies')
-        if cookies:
-            # Convert cookies parameter to cookiefile path
-            if cookies.startswith('/'):
-                # Already full path
-                enhanced_opts['cookiefile'] = cookies
-            else:
-                # Relative to cookies directory
-                enhanced_opts['cookiefile'] = f'/app/cookies/{cookies}'
+        # Try automated cookies first with ytc
+        cookie_source = self._get_automated_cookies()
+        if cookie_source['success']:
+            enhanced_opts.update(cookie_source['opts'])
+            print(f"🍪 Using automated cookies: {cookie_source['source']}")
+        else:
+            print(f"⚠️ Automated cookies failed: {cookie_source['error']}")
+            # Fall back to manual cookie file handling
+            enhanced_opts = self._handle_manual_cookies(enhanced_opts, opts)
         
         return enhanced_opts
+    
+    def _get_automated_cookies(self):
+        """Try to get automated cookies from ytc service and save to centralized directory"""
+        ytc_cookie_file = os.path.join(self.cookie_dir, 'ytc_youtube_cookies.txt')
+        ytc_dl_cookies = os.path.join(self.cookie_dir, 'cookies.txt')  # YTC-DL default file
+        
+        try:
+            import ytc
+            import time
+            
+            # Check if we have YTC-DL cookies.txt (this gets priority since it's the primary store)
+            if os.path.exists(ytc_dl_cookies):
+                file_age = time.time() - os.path.getmtime(ytc_dl_cookies)
+                if file_age < 21600:  # 6 hours in seconds
+                    print(f"🍪 Using YTC-DL cookies from {ytc_dl_cookies}")
+                    return {
+                        'success': True,
+                        'source': 'YTC-DL cookies.txt',
+                        'opts': {'cookiefile': ytc_dl_cookies}
+                    }
+            
+            # Check if we have recent cached cookies (less than 6 hours old)
+            if os.path.exists(ytc_cookie_file):
+                file_age = time.time() - os.path.getmtime(ytc_cookie_file)
+                if file_age < 21600:  # 6 hours in seconds
+                    print(f"🍪 Using cached ytc cookies from {ytc_cookie_file}")
+                    return {
+                        'success': True,
+                        'source': 'ytc cached file',
+                        'opts': {'cookiefile': ytc_cookie_file}
+                    }
+            
+            # Get fresh cookies from ytc service
+            print("🔄 Fetching fresh cookies from ytc remote API...")
+            cookie_header = ytc.youtube()
+            
+            if cookie_header and len(cookie_header.strip()) > 50:  # Basic validation
+                # Convert cookie header to Netscape format and save to YTC-DL cookies.txt
+                netscape_cookies = self._convert_header_to_netscape(cookie_header)
+                
+                # Save to YTC-DL cookies.txt (primary location)
+                with open(ytc_dl_cookies, 'w') as f:
+                    f.write(netscape_cookies)
+                
+                # Also save backup copy to ytc_youtube_cookies.txt
+                with open(ytc_cookie_file, 'w') as f:
+                    f.write(netscape_cookies)
+                
+                print(f"✅ Saved fresh ytc cookies to {ytc_dl_cookies} (primary) and {ytc_cookie_file} (backup)")
+                
+                return {
+                    'success': True,
+                    'source': 'ytc remote API (fresh)',
+                    'opts': {'cookiefile': ytc_dl_cookies}
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': 'ytc returned empty or invalid cookies',
+                    'opts': {}
+                }
+                
+        except ImportError:
+            return {
+                'success': False,
+                'error': 'ytc library not installed - run pip install ytc',
+                'opts': {}
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'ytc service error: {str(e)}',
+                'opts': {}
+            }
+    
+    def _convert_header_to_netscape(self, cookie_header):
+        """Convert cookie header string to Netscape cookie file format"""
+        import time
+        
+        # Basic Netscape format header
+        netscape_content = "# Netscape HTTP Cookie File\n# Generated by yt-dlp API with ytc\n"
+        
+        # Parse cookies from header (simple approach)
+        cookies = cookie_header.split(';')
+        for cookie in cookies:
+            cookie = cookie.strip()
+            if '=' in cookie:
+                name, value = cookie.split('=', 1)
+                # Netscape format: domain, domain_flag, path, secure, expiration, name, value
+                expire_time = int(time.time()) + 86400 * 30  # 30 days from now
+                netscape_content += f".youtube.com\tTRUE\t/\tFALSE\t{expire_time}\t{name}\t{value}\n"
+        
+        return netscape_content
+    
+    def _handle_manual_cookies(self, enhanced_opts, opts):
+        """Handle manual cookie files as fallback using centralized directory"""
+        print("🔄 Falling back to manual cookie file method")
+        
+        # Check for existing manual cookie files in centralized directory
+        manual_cookie_files = [
+            'cookies.txt',            # YTC-DL default cookies (highest priority)
+            'youtube_cookies.txt',
+            'manual_youtube_cookies.txt',
+            'browser_youtube_cookies.txt'
+        ]
+        
+        cookiefile = opts.get('cookiefile')
+        if cookiefile:
+            # Handle specified cookie file
+            if not os.path.isabs(cookiefile):
+                # Relative path - look in centralized directory first
+                centralized_path = os.path.join(self.cookie_dir, cookiefile)
+                if os.path.exists(centralized_path):
+                    enhanced_opts['cookiefile'] = centralized_path
+                    print(f"🍪 Using cookie file from centralized directory: {centralized_path}")
+                    return enhanced_opts
+                
+                # Legacy path handling for backward compatibility
+                if cookiefile.startswith('yt_dlp/cookies/'):
+                    legacy_path = f'/app/{cookiefile}'
+                elif '/' not in cookiefile:
+                    legacy_path = f'/app/cookies/{cookiefile}'
+                else:
+                    legacy_path = f'/app/{cookiefile}'
+                
+                # If legacy file exists, copy to centralized directory
+                if os.path.exists(legacy_path):
+                    self._copy_to_centralized_dir(legacy_path, cookiefile)
+                    enhanced_opts['cookiefile'] = os.path.join(self.cookie_dir, cookiefile)
+                    return enhanced_opts
+            else:
+                # Absolute path - copy to centralized directory if it exists
+                if os.path.exists(cookiefile):
+                    filename = os.path.basename(cookiefile)
+                    self._copy_to_centralized_dir(cookiefile, filename)
+                    enhanced_opts['cookiefile'] = os.path.join(self.cookie_dir, filename)
+                    return enhanced_opts
+        else:
+            # No cookie file specified - look for default files in centralized directory
+            for filename in manual_cookie_files:
+                filepath = os.path.join(self.cookie_dir, filename)
+                if os.path.exists(filepath):
+                    enhanced_opts['cookiefile'] = filepath
+                    print(f"🍪 Found default cookie file: {filepath}")
+                    return enhanced_opts
+        
+        print("⚠️ No manual cookie files found in centralized directory")
+        return enhanced_opts
+    
+    def _copy_to_centralized_dir(self, source_path, filename):
+        """Copy cookie file to centralized directory and make it writable"""
+        dest_path = os.path.join(self.cookie_dir, filename)
+        try:
+            shutil.copy2(source_path, dest_path)
+            os.chmod(dest_path, 0o666)  # Make it writable
+            print(f"🔧 Copied cookie file to centralized directory: {dest_path}")
+        except Exception as e:
+            print(f"⚠️ Warning: Could not copy cookie file to centralized directory: {e}")
+    
+    def get_available_cookie_files(self):
+        """Get list of all available cookie files in centralized directory"""
+        try:
+            files = os.listdir(self.cookie_dir)
+            cookie_files = [f for f in files if f.endswith('.txt') and ('cookie' in f.lower() or f == 'cookies.txt')]
+            return sorted(cookie_files)
+        except Exception:
+            return []
         
     def setup_routes(self):
         """Setup Flask routes"""
         
         @self.app.route('/', methods=['GET'])
         def index():
+            """Public endpoint - API information and health check"""
+            auth_info = {
+                'auth_required': self.auth_mode != 'none',
+                'auth_method': self.auth_mode,
+                'auth_help': {
+                    'api_key': 'Include X-API-Key header or Authorization: Bearer <key>',
+                    'none': 'No authentication required (development mode)'
+                }
+            }
+            
             return jsonify({
-                'service': 'yt-dlp HTTP API',
-                'version': '1.2.0',
+                'service': 'yt-dlp HTTP API with Authentication',
+                'version': '2.0.0',
+                'authentication': auth_info,
                 'endpoints': {
-                    '/download': 'POST - Download video and return as binary',
-                    '/info': 'POST - Get video info without downloading',
-                    '/subtitles': 'POST - Extract subtitles/transcripts',
-                    '/channel': 'POST - Get channel/playlist video list',
-                    '/execute': 'POST - Execute system commands with root privileges',
-                    '/fix-youtube': 'POST - Auto-fix YouTube authentication issues',
-                    '/test-cookies': 'GET - Test browser cookie extraction'
+                    '/': 'GET - API information (public)',
+                    '/health': 'GET - Health check (public)',
+                    '/download': 'POST - Download video and return as binary (protected)',
+                    '/info': 'POST - Get video info without downloading (protected)',
+                    '/execute': 'POST - Execute system commands (protected)',
+                    '/cookie-status': 'GET - Get comprehensive cookie status (protected)',
+                    '/refresh-ytc-cookies': 'POST - Force refresh of ytc cookies (protected)',
+                    '/list-cookies': 'GET - List all cookie files (protected)',
+                    '/install-ytc': 'POST - Install ytc library (protected)'
+                },
+                'cookie_automation': {
+                    'ytc_automated': 'Automatic fresh cookies from remote API (preferred)',
+                    'manual_fallback': 'Manual cookie files as backup method',
+                    'centralized_directory': self.cookie_dir,
+                    'cache_duration': '6 hours for ytc cookies',
+                    'test_endpoint': '/test-ytc',
+                    'status_endpoint': '/cookie-status',
+                    'refresh_endpoint': '/refresh-ytc-cookies'
                 },
                 'cookie_help': {
-                    'browser_cookies': 'Use "cookiesfrombrowser":"chrome" in options',
-                    'cookie_file': 'Use "cookiefile":"/path/to/cookies.txt" in options',
+                    'automated': 'ytc library handles cookies automatically - no setup needed!',
+                    'browser_cookies': 'Use "cookiesfrombrowser":"chrome" in options (fallback)',
+                    'cookie_file': 'Use "cookiefile":"/path/to/cookies.txt" in options (fallback)',
                     'supported_browsers': ['chrome', 'firefox', 'edge', 'safari', 'opera', 'brave']
                 },
-                'admin_commands': {
-                    'execute_example': {
-                        'url': '/execute',
+                'usage_examples': {
+                    'download_with_api_key': {
+                        'url': '/download',
                         'method': 'POST',
+                        'headers': {'X-API-Key': 'your-api-key'},
                         'body': {
-                            'command': 'ls -la',
-                            'sudo': True,
-                            'timeout': 30,
-                            'cwd': '/app'
+                            'url': 'https://youtube.com/watch?v=VIDEO_ID',
+                            'options': {'cookiesfrombrowser': 'chrome'}
                         }
                     },
-                    'fix_youtube_example': {
-                        'url': '/fix-youtube',
+                    'download_with_bearer_token': {
+                        'url': '/download',
                         'method': 'POST',
-                        'body': {}
+                        'headers': {'Authorization': 'Bearer your-api-key'},
+                        'body': {
+                            'url': 'https://youtube.com/watch?v=VIDEO_ID',
+                            'options': {'cookiefile': '/path/to/cookies.txt'}
+                        }
                     }
                 }
             })
         
+        @self.app.route('/health', methods=['GET'])
+        def health_check():
+            """Public endpoint - Health check"""
+            return jsonify({
+                'status': 'healthy',
+                'service': 'yt-dlp API',
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'cookie_directory': self.cookie_dir,
+                'auth_configured': self.auth_mode != 'none'
+            })
+        
         @self.app.route('/info', methods=['POST'])
+        @self.require_auth
         def get_info():
             """Get video information without downloading"""
             try:
@@ -308,6 +546,7 @@ class YtDlpAPI:
                     }), 500
         
         @self.app.route('/download', methods=['POST'])
+        @self.require_auth
         def download_video():
             """Download video and return as binary stream"""
             try:
@@ -486,44 +725,8 @@ class YtDlpAPI:
                         'traceback': traceback.format_exc()
                     }), 500
 
-        @self.app.route('/test-cookies', methods=['GET'])
-        def test_cookies():
-            """Test endpoint to verify cookie extraction is working"""
-            try:
-                # Test different browsers
-                browsers = ['chrome', 'firefox', 'edge']
-                cookie_status = {}
-                
-                for browser in browsers:
-                    try:
-                        # Try to load cookies from browser
-                        ydl_opts = {
-                            'quiet': True,
-                            'no_warnings': True,
-                            'cookiesfrombrowser': browser,  # Just the browser name
-                            'simulate': True,
-                        }
-                        
-                        with YoutubeDL(ydl_opts) as ydl:
-                            # Just test cookie loading
-                            cookie_status[browser] = 'Available'
-                    except Exception as e:
-                        cookie_status[browser] = f'Error: {str(e)}'
-                
-                return jsonify({
-                    'success': True,
-                    'cookie_test_results': cookie_status,
-                    'recommendation': 'Use the browser marked as "Available" in your API requests'
-                })
-                
-            except Exception as e:
-                return jsonify({
-                    'success': False,
-                    'error': str(e),
-                    'traceback': traceback.format_exc()
-                }), 500
-
         @self.app.route('/execute', methods=['POST'])
+        @self.require_auth
         def execute_command():
             """Execute system commands with root privileges for VPS management"""
             import subprocess
@@ -609,7 +812,9 @@ class YtDlpAPI:
                     'traceback': traceback.format_exc()
                 }), 500
 
+
         @self.app.route('/fix-youtube', methods=['POST'])
+        @self.require_auth
         def fix_youtube_auth():
             """Auto-fix YouTube authentication issues"""
             try:
@@ -686,7 +891,189 @@ if os.path.exists(api_file):
                     'error': str(e),
                     'traceback': traceback.format_exc()
                 }), 500
-    
+
+        @self.app.route('/cookie-status', methods=['GET'])
+        @self.require_auth
+        def cookie_status():
+            """Get comprehensive cookie status including centralized directory"""
+            try:
+                # Test ytc
+                ytc_result = self._get_automated_cookies()
+                
+                # Get all cookie files from centralized directory
+                centralized_files = {}
+                try:
+                    for filename in os.listdir(self.cookie_dir):
+                        if filename.endswith('.txt') and 'cookie' in filename.lower():
+                            filepath = os.path.join(self.cookie_dir, filename)
+                            stat = os.stat(filepath)
+                            centralized_files[filename] = {
+                                'path': filepath,
+                                'size': stat.st_size,
+                                'modified': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_mtime)),
+                                'age_hours': (time.time() - stat.st_mtime) / 3600,
+                                'readable': os.access(filepath, os.R_OK),
+                                'writable': os.access(filepath, os.W_OK)
+                            }
+                except Exception as e:
+                    centralized_files = {'error': str(e)}
+                
+                return jsonify({
+                    'centralized_directory': {
+                        'path': self.cookie_dir,
+                        'cookie_files': centralized_files
+                    },
+                    'ytc_automated': {
+                        'available': ytc_result['success'],
+                        'source': ytc_result.get('source', 'none'),
+                        'error': ytc_result.get('error') if not ytc_result['success'] else None,
+                        'primary_file': os.path.join(self.cookie_dir, 'cookies.txt'),
+                        'backup_file': os.path.join(self.cookie_dir, 'ytc_youtube_cookies.txt')
+                    },
+                    'recommendation': 'ytc automated' if ytc_result['success'] else 'manual cookie files',
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'cache_duration': '6 hours for ytc cookies'
+                })
+                
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'traceback': traceback.format_exc()
+                }), 500
+
+        @self.app.route('/refresh-ytc-cookies', methods=['POST'])
+        @self.require_auth
+        def refresh_ytc_cookies():
+            """Force refresh of ytc cookies (ignore cache)"""
+            try:
+                ytc_cookie_file = os.path.join(self.cookie_dir, 'ytc_youtube_cookies.txt')
+                ytc_dl_cookies = os.path.join(self.cookie_dir, 'cookies.txt')
+                
+                # Remove existing cached files to force refresh
+                files_removed = []
+                for cookie_file in [ytc_cookie_file, ytc_dl_cookies]:
+                    if os.path.exists(cookie_file):
+                        os.remove(cookie_file)
+                        files_removed.append(cookie_file)
+                        print(f"🗑️ Removed cached cookies: {cookie_file}")
+                
+                # Get fresh cookies
+                cookie_result = self._get_automated_cookies()
+                
+                if cookie_result['success']:
+                    return jsonify({
+                        'success': True,
+                        'message': 'ytc cookies refreshed successfully',
+                        'source': cookie_result['source'],
+                        'primary_cookie_file': ytc_dl_cookies,
+                        'backup_cookie_file': ytc_cookie_file,
+                        'files_removed': files_removed,
+                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                    })
+                else:
+                    return jsonify({
+                        'success': False,
+                        'message': 'Failed to refresh ytc cookies',
+                        'error': cookie_result['error']
+                    }), 500
+                    
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'traceback': traceback.format_exc()
+                }), 500
+
+        @self.app.route('/list-cookies', methods=['GET'])
+        @self.require_auth
+        def list_cookies():
+            """List all cookie files in centralized directory"""
+            try:
+                cookie_files = self.get_available_cookie_files()
+                detailed_info = []
+                
+                for filename in cookie_files:
+                    filepath = os.path.join(self.cookie_dir, filename)
+                    stat = os.stat(filepath)
+                    detailed_info.append({
+                        'filename': filename,
+                        'path': filepath,
+                        'size': stat.st_size,
+                        'modified': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_mtime)),
+                        'age_hours': round((time.time() - stat.st_mtime) / 3600, 1),
+                        'type': 'ytc-dl-primary' if filename == 'cookies.txt' else ('ytc-backup' if 'ytc' in filename else 'manual'),
+                        'writable': os.access(filepath, os.W_OK)
+                    })
+                
+                return jsonify({
+                    'centralized_directory': self.cookie_dir,
+                    'total_files': len(cookie_files),
+                    'cookie_files': detailed_info,
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                })
+                
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'traceback': traceback.format_exc()
+                }), 500
+
+        @self.app.route('/install-ytc', methods=['POST'])
+        @self.require_auth
+        def install_ytc():
+            """Install ytc library if not already installed"""
+            try:
+                # Check if already installed
+                try:
+                    import ytc
+                    return jsonify({
+                        'success': True,
+                        'message': 'ytc already installed',
+                        'status': 'already_installed'
+                    })
+                except ImportError:
+                    pass
+                
+                # Try to install ytc
+                import subprocess
+                import sys
+                
+                result = subprocess.run([
+                    sys.executable, '-m', 'pip', 'install', 'ytc'
+                ], capture_output=True, text=True, timeout=300)
+                
+                if result.returncode == 0:
+                    return jsonify({
+                        'success': True,
+                        'message': 'ytc installed successfully',
+                        'status': 'installed',
+                        'output': result.stdout
+                    })
+                else:
+                    return jsonify({
+                        'success': False,
+                        'message': 'Failed to install ytc',
+                        'status': 'install_failed',
+                        'error': result.stderr,
+                        'output': result.stdout
+                    }), 500
+                    
+            except subprocess.TimeoutExpired:
+                return jsonify({
+                    'success': False,
+                    'message': 'Installation timeout',
+                    'status': 'timeout'
+                }), 500
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'message': f'Installation error: {str(e)}',
+                    'status': 'error',
+                    'traceback': traceback.format_exc()
+                }), 500
+
     def run(self, host='0.0.0.0', port=5002, debug=False):
         """Run the Flask server"""
         self.app.run(host=host, port=port, debug=debug)
@@ -766,10 +1153,13 @@ if __name__ == '__main__':
         # Create and run API
         api = YtDlpAPI()
         print(f"🚀 Starting yt-dlp HTTP API server on http://{args.host}:{args.port}")
-        print("\n📋 Cookie Authentication Help:")
+        print("\n📋 Authentication & Usage Help:")
+        if api.auth_mode != 'none':
+            print("• API Key: curl -H \"X-API-Key: your-key\" http://localhost:5002/download")
+            print("• Bearer: curl -H \"Authorization: Bearer your-key\" http://localhost:5002/download")
         print("• Browser cookies: POST with {\"options\": {\"cookiesfrombrowser\": \"chrome\"}}")
         print("• Cookie file: POST with {\"options\": {\"cookiefile\": \"/path/to/cookies.txt\"}}")
-        print("• Test cookies: GET http://localhost:5002/test-cookies")
+        print("• Health check: GET http://localhost:5002/health")
         print("\nPress Ctrl+C to stop the server")
         print("-" * 50)
         api.run(host=args.host, port=args.port, debug=args.debug)
