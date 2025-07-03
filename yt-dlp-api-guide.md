@@ -7,6 +7,7 @@
 | **Video Only** | `/download` with `"bestvideo[height=720][ext=mp4]"` | 720p MP4 video without audio |
 | **Audio Only** | `/download` with `"bestaudio[ext=m4a]/bestaudio"` | Best audio in M4A format |
 | **Video + Audio** | `/download` with `"bestvideo[height=720][ext=mp4]+bestaudio[ext=m4a]/best"` | 720p video with audio combined |
+| **Channel Download** | `/channel` → `/job/{job_id}` | Job-based channel downloads with progress tracking |
 | **URL Transcription** | `/transcribe` with `"model": "base"` | Audio-to-text from URL using OpenAI Whisper |
 | **File Upload Transcription** | `/transcribe-file` with file upload | Transcribe uploaded MP4/MP3/audio files |
 | **Download + Transcribe** | `/download` with `"transcribe": true` | Download video and get transcription in one request |
@@ -319,6 +320,183 @@ curl -X POST http://localhost:5002/download \
   -o video_subtitles.srt
 ```
 
+## Job-Based Channel Downloads
+
+### **Problem Solved:**
+- ❌ **Old System**: HTTP timeouts on large channels, no progress tracking
+- ✅ **New System**: Instant job creation, real-time progress, no timeouts
+
+### **How It Works:**
+1. **Start Job**: POST to `/channel` → Get `job_id` immediately
+2. **Track Progress**: GET `/job/{job_id}` → See real-time status
+3. **Get Results**: GET `/job/{job_id}/results` → All videos and transcriptions
+4. **Download Videos**: GET `/job/{job_id}/download/{video_index}` → Individual files
+
+### **Start Channel Download:**
+```bash
+curl -X POST http://localhost:5002/channel \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
+  -d '{
+    "url": "https://www.youtube.com/c/SomeChannel",
+    "max_videos": 100,
+    "transcribe": true,
+    "transcribe_model": "tiny"
+  }'
+```
+
+**Response (Immediate):**
+```json
+{
+  "success": true,
+  "job_id": "12345678-1234-1234-1234-123456789abc",
+  "message": "Channel download started",
+  "channel_title": "Tech Channel",
+  "total_videos": 100,
+  "status_url": "/job/12345678-1234-1234-1234-123456789abc",
+  "estimated_time": "1000 seconds"
+}
+```
+
+### **Track Progress:**
+```bash
+curl -H "X-API-Key: your_api_key" \
+  http://localhost:5002/job/12345678-1234-1234-1234-123456789abc
+```
+
+**Response (Real-time):**
+```json
+{
+  "id": "12345678-1234-1234-1234-123456789abc",
+  "type": "channel",
+  "status": "running",
+  "total_items": 100,
+  "completed_items": 25,
+  "failed_items": 2,
+  "progress_percent": 25.0,
+  "current_item": "Downloading: Introduction to Python...",
+  "channel_title": "Tech Channel",
+  "transcriptions": [...]
+}
+```
+
+### **Get All Results:**
+```bash
+curl -H "X-API-Key: your_api_key" \
+  http://localhost:5002/job/12345678-1234-1234-1234-123456789abc/results
+```
+
+**Response (When Complete):**
+```json
+{
+  "job_id": "12345678-1234-1234-1234-123456789abc",
+  "status": "completed",
+  "channel_title": "Tech Channel",
+  "total_videos": 100,
+  "successful_downloads": 98,
+  "failed_downloads": 2,
+  "transcriptions_count": 98,
+  "total_size_mb": 1250.5,
+  "results": [
+    {
+      "url": "https://youtube.com/watch?v=xyz",
+      "title": "Video 1",
+      "success": true,
+      "file_size": 12345678,
+      "download_time": 4.2,
+      "format": "m4a",
+      "transcription": {...}
+    }
+  ],
+  "transcriptions": [
+    {
+      "video_title": "Video 1",
+      "video_url": "https://youtube.com/watch?v=xyz",
+      "transcription": {
+        "text": "Full transcript...",
+        "language": "en",
+        "segments": [...]
+      }
+    }
+  ]
+}
+```
+
+### **Download Individual Videos:**
+```bash
+# Download video #0 (first video)
+curl -H "X-API-Key: your_api_key" \
+  http://localhost:5002/job/12345678-1234-1234-1234-123456789abc/download/0 \
+  -o "video_1.m4a"
+
+# Download video #5 (sixth video)
+curl -H "X-API-Key: your_api_key" \
+  http://localhost:5002/job/12345678-1234-1234-1234-123456789abc/download/5 \
+  -o "video_6.m4a"
+```
+
+### **Get All Transcriptions:**
+```bash
+# As JSON
+curl -H "X-API-Key: your_api_key" \
+  "http://localhost:5002/job/12345678-1234-1234-1234-123456789abc/transcriptions?format=json"
+
+# As combined text file
+curl -H "X-API-Key: your_api_key" \
+  "http://localhost:5002/job/12345678-1234-1234-1234-123456789abc/transcriptions?format=text" \
+  -o "all_transcriptions.txt"
+
+# As SRT subtitles
+curl -H "X-API-Key: your_api_key" \
+  "http://localhost:5002/job/12345678-1234-1234-1234-123456789abc/transcriptions?format=srt" \
+  -o "all_subtitles.srt"
+```
+
+## Job Status Values
+
+| **Status** | **Description** |
+|------------|-----------------|
+| `starting` | Job created, initializing |
+| `running` | Actively downloading videos |
+| `completed` | All videos processed successfully |
+| `failed` | Job encountered fatal error |
+
+## Data Storage & Cleanup
+
+### **Where Everything Goes:**
+- **Videos**: Stored in memory only, no disk files
+- **Transcriptions**: Stored in job data structure
+- **Job Data**: Kept in API memory until restart
+- **Temporary Files**: Auto-deleted after transcription
+
+### **Memory Management:**
+- **Batch Processing**: 3-5 videos at a time
+- **Auto Cleanup**: Garbage collection after each batch
+- **Memory Monitoring**: Warnings at 90%+ RAM usage
+- **No Disk Storage**: Everything stays in memory
+
+### **100+ Video Example:**
+```json
+{
+  "url": "https://www.youtube.com/c/LargeChannel",
+  "max_videos": 100,
+  "max_workers": 2,
+  "batch_size": 3,
+  "delay": 2.0,
+  "transcribe": true,
+  "transcribe_model": "tiny"
+}
+```
+
+**Processing Flow:**
+1. **Job Created**: Returns `job_id` instantly
+2. **Batch 1**: Downloads videos 1-3 → transcribes → cleanup
+3. **Batch 2**: Downloads videos 4-6 → transcribes → cleanup
+4. **...continues**: Until all 100 videos done
+5. **Results Available**: All videos + transcriptions accessible via job endpoints
+
+**No Timeouts**: Job runs in background, check progress anytime!
+
 ## Technical Details
 
 ### File Format Support
@@ -340,6 +518,76 @@ curl -X POST http://localhost:5002/download \
 - Same authentication as existing API endpoints
 - File upload size limits (configurable)
 - Temporary file cleanup for security
+
+## Channel Download Limitations & YouTube Rate Limits
+
+### VPS Optimization (4GB RAM / 1vCPU)
+- **Max Videos**: No hard limit - can download entire channels
+- **Max Workers**: 3 parallel downloads (hard limit)
+- **Batch Size**: 5 videos per batch (hard limit)
+- **Memory Monitoring**: Warning at 90% RAM usage, garbage collection at 95%
+- **File Storage**: No files saved to disk - all in memory only
+- **Auto Cleanup**: Automatic garbage collection after each batch
+- **Rate Limiting**: Minimum 1 second delay between downloads
+
+### What Happens with 100+ Videos?
+- **Single Request**: Download all 100 videos in one API call
+- **Automatic Batching**: Videos processed in small batches (3-5 at a time)
+- **Memory Management**: Garbage collection after each batch + at 95% RAM
+- **No Disk Storage**: Videos stay in memory only, no files saved
+- **Rate Limiting**: 2+ second delays prevent YouTube throttling
+- **Progress Streaming**: Real-time updates show which videos succeed/fail
+- **Resilient**: Individual video failures don't stop the entire channel download
+
+### Example: 100 Video Channel Download
+```json
+{
+  "url": "https://www.youtube.com/c/LargeChannel",
+  "max_videos": 100,     // No limit - downloads all 100 videos
+  "max_workers": 2,      // Conservative for VPS
+  "batch_size": 3,       // Small batches for memory management
+  "delay": 2.5,          // Avoid rate limits
+  "transcribe": false,   // Disable for large batches
+  "format": "bestaudio[filesize<30M]"
+}
+```
+
+**Single Request Downloads Everything:**
+- Downloads videos 1-3 (batch 1) → cleanup → pause 3s
+- Downloads videos 4-6 (batch 2) → cleanup → pause 3s  
+- Downloads videos 7-9 (batch 3) → cleanup → pause 3s
+- ... continues until all 100 videos are done
+- Final cleanup and summary
+
+### YouTube Rate Limits
+- **No Official API Limits**: YouTube doesn't publish specific rate limits for yt-dlp
+- **Recommended Delays**: 2-3 seconds between requests to avoid throttling
+- **IP-based Throttling**: YouTube may slow down or block aggressive downloading
+- **Best Practices**:
+  - Use `delay: 2.0` or higher for channels with many videos
+  - Limit `max_videos` to 10-15 for large channels
+  - Use `max_workers: 1` for sensitive channels
+  - Avoid downloading from the same channel repeatedly
+
+### Error Handling
+- **429 Too Many Requests**: YouTube is rate limiting - increase delay
+- **403 Forbidden**: Possible IP block - wait 30-60 minutes
+- **Memory Errors**: Reduce `max_videos`, `max_workers`, or `batch_size`
+- **Network Timeouts**: Increase delays, reduce parallel workers
+
+### Performance Recommendations
+| **VPS Specs** | **Max Videos** | **Max Workers** | **Batch Size** | **Delay** |
+|---------------|----------------|-----------------|----------------|-----------|
+| 2GB RAM / 1vCPU | 10 | 1 | 2 | 3.0s |
+| 4GB RAM / 1vCPU | 15 | 2 | 3 | 2.0s |
+| 8GB RAM / 2vCPU | 25 | 3 | 5 | 1.5s |
+| 16GB RAM / 4vCPU | 50 | 5 | 8 | 1.0s |
+
+### Whisper + Channel Downloads
+- **Use "tiny" model**: Fastest processing for batch operations
+- **Memory Impact**: Each transcription uses ~200MB additional RAM
+- **Processing Time**: Add 30-60 seconds per video for transcription
+- **Recommendation**: Disable transcription for channels with 15+ videos
 
 ## Performance Notes
 

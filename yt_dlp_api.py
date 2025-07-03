@@ -48,6 +48,9 @@ import time
 import traceback
 from functools import wraps
 from urllib.parse import parse_qs, urlparse
+import uuid
+import threading
+from datetime import datetime
 
 # Ensure FFmpeg is in PATH
 os.environ["PATH"] = "/usr/bin:" + os.environ.get("PATH", "")
@@ -69,6 +72,11 @@ class YtDlpAPI:
         self.cookie_dir = self._setup_cookie_directory()
         self._setup_auth()
         self._auto_setup_cookies()  # Automatically handle cookie setup
+        
+        # Job tracking system
+        self.jobs = {}  # {job_id: job_data}
+        self.jobs_lock = threading.Lock()
+        
         self.setup_routes()
     
     def _setup_auth(self):
@@ -140,6 +148,69 @@ class YtDlpAPI:
             raise RuntimeError("Could not create writable cookie directory")
         
         return cookie_dir
+
+    def create_job(self, job_type, total_items=0, **kwargs):
+        """Create a new job and return job_id"""
+        job_id = str(uuid.uuid4())
+        
+        with self.jobs_lock:
+            self.jobs[job_id] = {
+                'id': job_id,
+                'type': job_type,  # 'download', 'channel', 'transcribe'
+                'status': 'starting',  # starting, running, completed, failed
+                'created_at': datetime.now().isoformat(),
+                'updated_at': datetime.now().isoformat(),
+                'total_items': total_items,
+                'completed_items': 0,
+                'failed_items': 0,
+                'current_item': None,
+                'results': [],
+                'failed_results': [],
+                'error': None,
+                'progress_percent': 0,
+                'estimated_time_remaining': None,
+                'transcriptions': [],  # Store all transcriptions
+                **kwargs
+            }
+        
+        return job_id
+    
+    def update_job(self, job_id, **updates):
+        """Update job status and data"""
+        with self.jobs_lock:
+            if job_id in self.jobs:
+                self.jobs[job_id].update(updates)
+                self.jobs[job_id]['updated_at'] = datetime.now().isoformat()
+                
+                # Calculate progress
+                if self.jobs[job_id]['total_items'] > 0:
+                    completed = self.jobs[job_id]['completed_items']
+                    total = self.jobs[job_id]['total_items']
+                    self.jobs[job_id]['progress_percent'] = (completed / total) * 100
+    
+    def get_job(self, job_id):
+        """Get job data"""
+        with self.jobs_lock:
+            return self.jobs.get(job_id, None)
+    
+    def add_job_result(self, job_id, result):
+        """Add a result to job"""
+        with self.jobs_lock:
+            if job_id in self.jobs:
+                if result.get('success', False):
+                    self.jobs[job_id]['results'].append(result)
+                    self.jobs[job_id]['completed_items'] += 1
+                else:
+                    self.jobs[job_id]['failed_results'].append(result)
+                    self.jobs[job_id]['failed_items'] += 1
+                
+                # Add transcription if present
+                if 'transcription' in result:
+                    self.jobs[job_id]['transcriptions'].append({
+                        'video_title': result.get('title', 'Unknown'),
+                        'video_url': result.get('url', ''),
+                        'transcription': result['transcription']
+                    })
 
     def _auto_setup_cookies(self):
         """Automatically set up cookies on API startup"""
@@ -1123,6 +1194,181 @@ if os.path.exists(api_file):
                     'traceback': traceback.format_exc()
                 }), 500
 
+        @self.app.route('/job/<job_id>', methods=['GET'])
+        @self.require_auth
+        def get_job_status(job_id):
+            """Get job status and progress"""
+            job = self.get_job(job_id)
+            if not job:
+                return jsonify({'error': 'Job not found'}), 404
+            
+            return jsonify(job)
+        
+        @self.app.route('/jobs', methods=['GET'])
+        @self.require_auth
+        def list_jobs():
+            """List all jobs"""
+            with self.jobs_lock:
+                jobs = list(self.jobs.values())
+            
+            # Sort by creation date (newest first)
+            jobs.sort(key=lambda x: x['created_at'], reverse=True)
+            
+            return jsonify({
+                'jobs': jobs,
+                'total': len(jobs)
+            })
+
+        @self.app.route('/job/<job_id>/results', methods=['GET'])
+        @self.require_auth
+        def get_job_results(job_id):
+            """Get all results from a completed job"""
+            job = self.get_job(job_id)
+            if not job:
+                return jsonify({'error': 'Job not found'}), 404
+            
+            if job['status'] != 'completed':
+                return jsonify({
+                    'error': 'Job not completed yet',
+                    'status': job['status'],
+                    'progress': f"{job['completed_items']}/{job['total_items']}"
+                }), 400
+            
+            return jsonify({
+                'job_id': job_id,
+                'status': job['status'],
+                'channel_title': job.get('channel_title', 'Unknown'),
+                'total_videos': job['total_items'],
+                'successful_downloads': job['completed_items'],
+                'failed_downloads': job['failed_items'],
+                'transcriptions_count': len(job.get('transcriptions', [])),
+                'results': job['results'],
+                'failed_results': job['failed_results'],
+                'transcriptions': job.get('transcriptions', []),
+                'total_size_mb': sum(r.get('file_size', 0) for r in job['results']) / 1024 / 1024
+            })
+
+        @self.app.route('/job/<job_id>/download/<int:video_index>', methods=['GET'])
+        @self.require_auth
+        def download_job_video(job_id, video_index):
+            """Download a specific video from a completed job"""
+            job = self.get_job(job_id)
+            if not job:
+                return jsonify({'error': 'Job not found'}), 404
+            
+            if job['status'] != 'completed':
+                return jsonify({'error': 'Job not completed yet'}), 400
+            
+            if video_index >= len(job['results']):
+                return jsonify({'error': 'Video index out of range'}), 400
+            
+            result = job['results'][video_index]
+            if not result.get('success', False):
+                return jsonify({'error': 'Video download failed'}), 400
+            
+            video_data = result.get('video_data')
+            if not video_data:
+                return jsonify({'error': 'Video data not available'}), 404
+            
+            # Determine filename and content type
+            title = result.get('title', 'video')
+            format_ext = result.get('format', 'mp4')
+            filename = f"{sanitize_filename(title)}.{format_ext}"
+            
+            content_type = {
+                'mp4': 'video/mp4',
+                'webm': 'video/webm',
+                'mp3': 'audio/mpeg',
+                'm4a': 'audio/mp4',
+                'wav': 'audio/wav'
+            }.get(format_ext, 'application/octet-stream')
+            
+            return Response(
+                video_data,
+                mimetype=content_type,
+                headers={
+                    'Content-Disposition': f'attachment; filename="{filename}"',
+                    'Content-Length': str(len(video_data)),
+                    'X-Video-Title': result.get('title', ''),
+                    'X-Video-URL': result.get('url', ''),
+                    'X-File-Size': str(result.get('file_size', 0)),
+                    'X-Download-Time': str(result.get('download_time', 0))
+                }
+            )
+
+        @self.app.route('/job/<job_id>/transcriptions', methods=['GET'])
+        @self.require_auth
+        def get_job_transcriptions(job_id):
+            """Get all transcriptions from a job as a single file"""
+            job = self.get_job(job_id)
+            if not job:
+                return jsonify({'error': 'Job not found'}), 404
+            
+            transcriptions = job.get('transcriptions', [])
+            if not transcriptions:
+                return jsonify({'error': 'No transcriptions available'}), 404
+            
+            format_type = request.args.get('format', 'json')
+            
+            if format_type == 'json':
+                return jsonify({
+                    'job_id': job_id,
+                    'channel_title': job.get('channel_title', 'Unknown'),
+                    'total_transcriptions': len(transcriptions),
+                    'transcriptions': transcriptions
+                })
+            
+            elif format_type == 'text':
+                text_content = f"Channel: {job.get('channel_title', 'Unknown')}\n"
+                text_content += f"Total Videos: {len(transcriptions)}\n"
+                text_content += "=" * 50 + "\n\n"
+                
+                for i, trans in enumerate(transcriptions, 1):
+                    text_content += f"Video {i}: {trans['video_title']}\n"
+                    text_content += f"URL: {trans['video_url']}\n"
+                    text_content += f"Transcript:\n{trans['transcription']['text']}\n"
+                    text_content += "-" * 30 + "\n\n"
+                
+                return Response(
+                    text_content,
+                    mimetype='text/plain',
+                    headers={
+                        'Content-Disposition': f'attachment; filename="transcriptions_{job_id}.txt"'
+                    }
+                )
+            
+            elif format_type == 'srt':
+                srt_content = ""
+                subtitle_index = 1
+                
+                for trans in transcriptions:
+                    srt_content += f"# {trans['video_title']}\n"
+                    srt_content += f"# {trans['video_url']}\n\n"
+                    
+                    if 'segments' in trans['transcription']:
+                        for segment in trans['transcription']['segments']:
+                            start_time = self._seconds_to_srt_time(segment['start'])
+                            end_time = self._seconds_to_srt_time(segment['end'])
+                            text = segment['text'].strip()
+                            
+                            srt_content += f"{subtitle_index}\n"
+                            srt_content += f"{start_time} --> {end_time}\n"
+                            srt_content += f"{text}\n\n"
+                            subtitle_index += 1
+                    
+                    srt_content += "\n"
+                
+                return Response(
+                    srt_content,
+                    mimetype='text/plain',
+                    headers={
+                        'Content-Disposition': f'attachment; filename="transcriptions_{job_id}.srt"'
+                    }
+                )
+            
+            else:
+                return jsonify({'error': 'Invalid format. Use: json, text, or srt'}), 400
+
         @self.app.route('/list-cookies', methods=['GET'])
         @self.require_auth
         def list_cookies():
@@ -1149,6 +1395,239 @@ if os.path.exists(api_file):
                     'total_files': len(cookie_files),
                     'cookie_files': detailed_info,
                     'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                })
+                
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'traceback': traceback.format_exc()
+                }), 500
+
+        @self.app.route('/channel', methods=['POST'])
+        @self.require_auth
+        def start_channel_download():
+            """Start a channel download job and return job_id immediately"""
+            try:
+                data = request.get_json(force=True)
+                if not data or 'url' not in data:
+                    return jsonify({'error': 'Channel URL is required'}), 400
+                
+                channel_url = data['url']
+                
+                # Get channel info first to determine total videos
+                try:
+                    with YoutubeDL({'extract_flat': True, 'quiet': True}) as ydl:
+                        channel_info = ydl.extract_info(channel_url, download=False)
+                        
+                        if not channel_info or 'entries' not in channel_info:
+                            return jsonify({'error': 'Could not extract channel videos'}), 400
+                        
+                        max_videos = data.get('max_videos', 10)
+                        videos = list(channel_info['entries'])[:max_videos]
+                        channel_title = channel_info.get('title', 'Unknown Channel')
+                        
+                except Exception as e:
+                    return jsonify({
+                        'error': f'Failed to get channel info: {str(e)}',
+                        'help': 'Make sure the URL is a valid YouTube channel'
+                    }), 400
+                
+                # Create job
+                job_id = self.create_job(
+                    job_type='channel',
+                    total_items=len(videos),
+                    channel_url=channel_url,
+                    channel_title=channel_title,
+                    request_data=data
+                )
+                
+                # Start background processing
+                def process_channel():
+                    try:
+                        self.update_job(job_id, status='running', current_item='Starting download...')
+                        
+                        # VPS-optimized defaults
+                        max_workers = min(data.get('max_workers', 2), 3)
+                        batch_size = min(data.get('batch_size', 3), 5)
+                        transcribe = data.get('transcribe', False)
+                        transcribe_model = data.get('transcribe_model', 'tiny')
+                        transcribe_format = data.get('transcribe_format', 'json')
+                        format_selector = data.get('format', 'bestaudio[filesize<50M]/best[filesize<50M]')
+                        delay_between_videos = max(data.get('delay', 2.0), 1.0)
+                        
+                        def download_single_video(video_info):
+                            """Download a single video with error handling"""
+                            try:
+                                video_url = f"https://www.youtube.com/watch?v={video_info['id']}"
+                                video_title = video_info.get('title', 'Unknown Title')
+                                
+                                self.update_job(job_id, current_item=f"Downloading: {video_title[:50]}...")
+                                
+                                # Memory check and cleanup
+                                import psutil
+                                memory = psutil.virtual_memory()
+                                if memory.percent > 95:
+                                    import gc
+                                    gc.collect()
+                                
+                                # Prepare download options
+                                opts = data.get('options', {})
+                                enhanced_opts = self._get_enhanced_ydl_opts(opts)
+                                enhanced_opts.update({
+                                    'format': format_selector,
+                                    'writesubtitles': False,
+                                    'writeautomaticsub': False,
+                                    'writethumbnail': False,
+                                    'writeinfojson': False,
+                                    'postprocessors': [],
+                                    'quiet': True
+                                })
+                                
+                                # Download video to memory
+                                from yt_dlp_memory_downloader import MemoryHttpFD
+                                
+                                class MemoryYDL(YoutubeDL):
+                                    def __init__(self, params=None):
+                                        super().__init__(params)
+                                        self.memory_downloader = None
+                                        
+                                    def dl(self, name, info, subtitle=False, test=False):
+                                        if not info.get('url'):
+                                            self.raise_no_formats(info, True)
+                                        self.memory_downloader = MemoryHttpFD(self, self.params)
+                                        success, real_download = self.memory_downloader.download(name, info, subtitle)
+                                        return success, real_download
+                                
+                                start_time = time.time()
+                                
+                                with MemoryYDL(enhanced_opts) as ydl:
+                                    info = ydl.extract_info(video_url, download=True)
+                                    
+                                    if not ydl.memory_downloader:
+                                        raise Exception("No data downloaded")
+                                    
+                                    video_data = ydl.memory_downloader.get_downloaded_data()
+                                    
+                                    if not video_data:
+                                        raise Exception("No video data received")
+                                
+                                download_time = time.time() - start_time
+                                file_size = len(video_data)
+                                
+                                result = {
+                                    'url': video_url,
+                                    'title': video_title,
+                                    'success': True,
+                                    'file_size': file_size,
+                                    'download_time': round(download_time, 2),
+                                    'format': info.get('ext', 'unknown'),
+                                    'video_data': video_data  # Keep in memory for now
+                                }
+                                
+                                # Add transcription if requested
+                                if transcribe:
+                                    try:
+                                        self.update_job(job_id, current_item=f"Transcribing: {video_title[:50]}...")
+                                        
+                                        import whisper
+                                        import tempfile
+                                        
+                                        model = whisper.load_model(transcribe_model)
+                                        
+                                        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{info.get("ext", "mp4")}') as temp_file:
+                                            temp_file.write(video_data)
+                                            temp_path = temp_file.name
+                                        
+                                        try:
+                                            transcribe_start = time.time()
+                                            whisper_result = model.transcribe(temp_path, language=data.get('language'))
+                                            transcribe_time = time.time() - transcribe_start
+                                            
+                                            if transcribe_format == 'text':
+                                                result['transcription'] = whisper_result['text']
+                                            else:
+                                                result['transcription'] = {
+                                                    'text': whisper_result['text'],
+                                                    'language': whisper_result.get('language', 'unknown'),
+                                                    'segments': whisper_result['segments'] if transcribe_format == 'json' else len(whisper_result['segments']),
+                                                    'model_used': transcribe_model,
+                                                    'transcribe_time': round(transcribe_time, 2)
+                                                }
+                                        finally:
+                                            try:
+                                                os.unlink(temp_path)
+                                            except:
+                                                pass
+                                                
+                                    except ImportError:
+                                        result['transcription_error'] = 'Whisper not installed'
+                                    except Exception as e:
+                                        result['transcription_error'] = str(e)
+                                
+                                time.sleep(delay_between_videos)
+                                return result
+                                
+                            except Exception as e:
+                                return {
+                                    'url': f"https://www.youtube.com/watch?v={video_info['id']}",
+                                    'title': video_info.get('title', 'Unknown Title'),
+                                    'success': False,
+                                    'error': str(e)
+                                }
+                        
+                        # Process videos in batches
+                        from concurrent.futures import ThreadPoolExecutor, as_completed
+                        
+                        for i in range(0, len(videos), batch_size):
+                            batch = videos[i:i + batch_size]
+                            batch_num = (i // batch_size) + 1
+                            total_batches = (len(videos) + batch_size - 1) // batch_size
+                            
+                            self.update_job(job_id, current_item=f"Processing batch {batch_num}/{total_batches}")
+                            
+                            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                                future_to_video = {executor.submit(download_single_video, video): video for video in batch}
+                                
+                                for future in as_completed(future_to_video):
+                                    result = future.result()
+                                    self.add_job_result(job_id, result)
+                            
+                            # Cleanup between batches
+                            if i + batch_size < len(videos):
+                                import gc
+                                gc.collect()
+                                time.sleep(3)
+                        
+                        # Final cleanup
+                        import gc
+                        gc.collect()
+                        
+                        self.update_job(job_id, 
+                                      status='completed', 
+                                      current_item='Download completed',
+                                      completed_at=datetime.now().isoformat())
+                        
+                    except Exception as e:
+                        self.update_job(job_id, 
+                                      status='failed', 
+                                      error=str(e),
+                                      current_item='Failed')
+                
+                # Start background thread
+                import threading
+                thread = threading.Thread(target=process_channel)
+                thread.daemon = True
+                thread.start()
+                
+                return jsonify({
+                    'success': True,
+                    'job_id': job_id,
+                    'message': 'Channel download started',
+                    'channel_title': channel_title,
+                    'total_videos': len(videos),
+                    'status_url': f'/job/{job_id}',
+                    'estimated_time': f'{len(videos) * 10} seconds'
                 })
                 
             except Exception as e:
