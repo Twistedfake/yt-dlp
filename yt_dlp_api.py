@@ -843,6 +843,40 @@ class YtDlpAPI:
         is_windows = platform.system() == 'Windows'
         ffmpeg_exe = 'ffmpeg.exe' if is_windows else 'ffmpeg'
         
+        # Explicit paths since we know where ffmpeg is located
+        if not is_windows:
+            # Linux/Unix - try known locations first
+            known_locations = [
+                '/usr/bin/ffmpeg',
+                '/usr/local/bin/ffmpeg',
+                '/opt/ffmpeg/bin/ffmpeg',
+                '/snap/bin/ffmpeg',  # Snap package
+            ]
+            
+            for location in known_locations:
+                if os.path.isfile(location):
+                    try:
+                        # Test that ffmpeg actually works
+                        subprocess.run([location, '-version'], 
+                                     capture_output=True, check=True, timeout=5)
+                        print(f"✅ Found working ffmpeg at: {location}")
+                        
+                        # Also check for ffprobe in same directory
+                        ffprobe_location = location.replace('/ffmpeg', '/ffprobe')
+                        if os.path.isfile(ffprobe_location):
+                            try:
+                                subprocess.run([ffprobe_location, '-version'], 
+                                             capture_output=True, check=True, timeout=5)
+                                print(f"✅ Found working ffprobe at: {ffprobe_location}")
+                            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+                                print(f"⚠️ ffprobe test failed at: {ffprobe_location}")
+                        else:
+                            print(f"⚠️ ffprobe not found at: {ffprobe_location}")
+                        
+                        return location
+                    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+                        continue
+        
         # First, try ffmpeg in PATH (works on all platforms)
         try:
             subprocess.run([ffmpeg_exe if is_windows else 'ffmpeg', '-version'], 
@@ -860,7 +894,7 @@ class YtDlpAPI:
         except ImportError:
             pass
         
-        # Platform-specific locations
+        # Platform-specific locations for fallback
         if is_windows:
             possible_locations = [
                 # WinGet installation
@@ -870,12 +904,8 @@ class YtDlpAPI:
                 r'C:\Program Files\ffmpeg\bin\ffmpeg.exe',
             ]
         else:
-            # Linux/Unix locations
+            # Additional Linux/Unix locations for fallback
             possible_locations = [
-                '/usr/bin/ffmpeg',
-                '/usr/local/bin/ffmpeg',
-                '/opt/ffmpeg/bin/ffmpeg',
-                '/snap/bin/ffmpeg',  # Snap package
                 '/usr/bin/avconv',   # Alternative on some systems
             ]
         
@@ -888,8 +918,27 @@ class YtDlpAPI:
 
     def _get_enhanced_ydl_opts(self, opts=None):
         """Get enhanced yt-dlp options with better anti-bot measures and automated cookies"""
+        import os
+        
         if opts is None:
             opts = {}
+        
+        # Get ffmpeg location
+        ffmpeg_location = self._get_ffmpeg_location()
+        if ffmpeg_location:
+            # If we found ffmpeg, also set ffprobe (usually in same directory)
+            if ffmpeg_location.endswith('/ffmpeg'):
+                ffprobe_location = ffmpeg_location.replace('/ffmpeg', '/ffprobe')
+            elif ffmpeg_location.endswith('\\ffmpeg.exe'):
+                ffprobe_location = ffmpeg_location.replace('\\ffmpeg.exe', '\\ffprobe.exe')
+            else:
+                ffprobe_location = None
+            
+            print(f"🎬 Using ffmpeg: {ffmpeg_location}")
+            if ffprobe_location and os.path.isfile(ffprobe_location):
+                print(f"🔍 Using ffprobe: {ffprobe_location}")
+        else:
+            print("⚠️ FFmpeg not found - transcription may fail")
         
         enhanced_opts = {
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -906,7 +955,7 @@ class YtDlpAPI:
             'ignoreerrors': True,
             'geo_bypass': True,
             'nocheckcertificate': True,
-            'ffmpeg_location': 'ffmpeg',
+            'ffmpeg_location': ffmpeg_location if ffmpeg_location else 'ffmpeg',
             'prefer_ffmpeg': True,
             **opts
         }
