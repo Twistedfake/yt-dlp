@@ -1388,7 +1388,7 @@ class YtDlpAPI:
         @self.app.route('/execute', methods=['POST'])
         @self.require_auth
         def execute_command():
-            """Execute system commands with root privileges for VPS management"""
+            """Execute system commands with environment-aware privilege management"""
             import subprocess
             import shlex
             import time
@@ -1399,7 +1399,20 @@ class YtDlpAPI:
                     raise BadRequest('Missing command in request body')
                 
                 command = data['command']
-                use_sudo = data.get('sudo', True)  # Default to using sudo
+                
+                # Smart sudo detection: default to False in container environments
+                def should_use_sudo_default():
+                    # Check if we're in a Docker container
+                    if os.path.exists('/.dockerenv'):
+                        return False
+                    # Check if sudo is available
+                    try:
+                        subprocess.run(['which', 'sudo'], capture_output=True, check=True, timeout=2)
+                        return True
+                    except:
+                        return False
+                
+                use_sudo = data.get('sudo', should_use_sudo_default())
                 timeout = data.get('timeout', 30)  # Default 30 seconds timeout
                 working_dir = data.get('cwd', '/app')  # Default to /app directory
                 
