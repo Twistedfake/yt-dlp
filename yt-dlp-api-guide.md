@@ -515,7 +515,7 @@ curl -X GET http://localhost:5002/health
     "active_workers": 2,
     "queue_size": 5,
     "is_running": true
-  }
+    }
 }
 ```
 
@@ -567,7 +567,7 @@ curl -s -X GET http://localhost:5002/job/$JOB_ID/results \
 while read -r count; do
   for i in $(seq 0 $((count-1))); do
     curl -X GET http://localhost:5002/job/$JOB_ID/download/$i \
-      -H "X-API-Key: your_api_key" \
+  -H "X-API-Key: your_api_key" \
       -o "video_$i.mp4"
   done
 done
