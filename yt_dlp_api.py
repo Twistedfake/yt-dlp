@@ -464,6 +464,7 @@ class YtDlpAPI:
     def _setup_cookie_directory(self):
         """Setup centralized cookie directory for both ytc and manual cookies"""
         import os
+        import tempfile
         
         # Use YTC-DL directory as the primary cookie location for consistency
         ytc_dl_dir = os.path.join(os.getcwd(), 'YTC-DL')
@@ -474,13 +475,17 @@ class YtDlpAPI:
             '/app/cookies',           # Docker/VPS standard
             './cookies',              # Local development
             os.path.expanduser('~/.yt-dlp/cookies'),  # User home directory
-            '/tmp/yt-dlp-cookies'     # Fallback temp directory
+            '/tmp/yt-dlp-cookies',    # Fallback temp directory
+            tempfile.gettempdir()     # System temp directory as last resort
         ]
         
         cookie_dir = None
         for dir_path in possible_dirs:
             try:
-                os.makedirs(dir_path, exist_ok=True)
+                # Create directory if it doesn't exist
+                if not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                
                 # Test write permissions
                 test_file = os.path.join(dir_path, '.test_write')
                 with open(test_file, 'w') as f:
@@ -489,11 +494,20 @@ class YtDlpAPI:
                 cookie_dir = dir_path
                 print(f"🍪 Cookie directory: {cookie_dir}")
                 break
-            except (OSError, PermissionError):
+            except (OSError, PermissionError) as e:
+                print(f"⚠️ Cannot use {dir_path}: {e}")
                 continue
         
         if not cookie_dir:
-            raise RuntimeError("Could not create writable cookie directory")
+            # If all else fails, use a temp directory that we know we can write to
+            try:
+                cookie_dir = tempfile.mkdtemp(prefix='yt-dlp-cookies-')
+                print(f"🍪 Using temporary cookie directory: {cookie_dir}")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not create any cookie directory: {e}")
+                # Return current directory as absolute fallback
+                cookie_dir = os.getcwd()
+                print(f"⚠️ Using current directory as cookie fallback: {cookie_dir}")
         
         return cookie_dir
 
@@ -682,15 +696,51 @@ class YtDlpAPI:
             **opts
         }
         
-        # Try automated cookies first with ytc
-        cookie_source = self._get_automated_cookies()
-        if cookie_source['success']:
-            enhanced_opts.update(cookie_source['opts'])
-            print(f"🍪 Using automated cookies: {cookie_source['source']}")
-        else:
-            print(f"⚠️ Automated cookies failed: {cookie_source['error']}")
-            # Fall back to manual cookie file handling
-            enhanced_opts = self._handle_manual_cookies(enhanced_opts, opts)
+        # Handle cookie files with permission fix
+        try:
+            # First check if a cookiefile is specified in opts
+            if 'cookiefile' in opts:
+                original_cookiefile = opts['cookiefile']
+                if os.path.exists(original_cookiefile) and os.access(original_cookiefile, os.R_OK):
+                    if not os.access(original_cookiefile, os.W_OK):
+                        # File exists but is not writable - create a copy
+                        writable_copy = self._create_writable_cookie_copy(original_cookiefile)
+                        if writable_copy:
+                            enhanced_opts['cookiefile'] = writable_copy
+                            print(f"🍪 Using writable cookie copy for specified file")
+                            return enhanced_opts
+                    else:
+                        # File is already writable
+                        enhanced_opts['cookiefile'] = original_cookiefile
+                        return enhanced_opts
+            
+            # Try automated cookies
+            cookie_source = self._get_automated_cookies()
+            if cookie_source['success'] and cookie_source['opts']:
+                original_cookiefile = cookie_source['opts'].get('cookiefile')
+                if original_cookiefile and os.path.exists(original_cookiefile):
+                    if not os.access(original_cookiefile, os.W_OK):
+                        # File exists but is not writable - create a copy
+                        writable_copy = self._create_writable_cookie_copy(original_cookiefile)
+                        if writable_copy:
+                            enhanced_opts['cookiefile'] = writable_copy
+                            print(f"🍪 Using writable automated cookie copy")
+                        else:
+                            enhanced_opts.update(cookie_source['opts'])
+                    else:
+                        enhanced_opts.update(cookie_source['opts'])
+                else:
+                    enhanced_opts.update(cookie_source['opts'])
+                print(f"🍪 Using automated cookies: {cookie_source['source']}")
+            else:
+                print(f"⚠️ Automated cookies failed: {cookie_source['error']}")
+                # Fall back to manual cookie file handling
+                enhanced_opts = self._handle_manual_cookies(enhanced_opts, opts)
+                
+        except Exception as e:
+            print(f"⚠️ Cookie handling error: {e}")
+            # Continue without cookies for public content
+            print("🔄 Continuing without cookies for public content")
         
         return enhanced_opts
     
@@ -704,26 +754,32 @@ class YtDlpAPI:
             import time
             
             # Check if we have YTC-DL cookies.txt (this gets priority since it's the primary store)
-            if os.path.exists(ytc_dl_cookies):
-                file_age = time.time() - os.path.getmtime(ytc_dl_cookies)
-                if file_age < 21600:  # 6 hours in seconds
-                    print(f"🍪 Using YTC-DL cookies from {ytc_dl_cookies}")
-                    return {
-                        'success': True,
-                        'source': 'YTC-DL cookies.txt',
-                        'opts': {'cookiefile': ytc_dl_cookies}
-                    }
+            try:
+                if os.path.exists(ytc_dl_cookies) and os.access(ytc_dl_cookies, os.R_OK):
+                    file_age = time.time() - os.path.getmtime(ytc_dl_cookies)
+                    if file_age < 21600:  # 6 hours in seconds
+                        print(f"🍪 Using YTC-DL cookies from {ytc_dl_cookies}")
+                        return {
+                            'success': True,
+                            'source': 'YTC-DL cookies.txt',
+                            'opts': {'cookiefile': ytc_dl_cookies}
+                        }
+            except (OSError, PermissionError) as e:
+                print(f"⚠️ Cannot access YTC-DL cookies file: {e}")
             
             # Check if we have recent cached cookies (less than 6 hours old)
-            if os.path.exists(ytc_cookie_file):
-                file_age = time.time() - os.path.getmtime(ytc_cookie_file)
-                if file_age < 21600:  # 6 hours in seconds
-                    print(f"🍪 Using cached ytc cookies from {ytc_cookie_file}")
-                    return {
-                        'success': True,
-                        'source': 'ytc cached file',
-                        'opts': {'cookiefile': ytc_cookie_file}
-                    }
+            try:
+                if os.path.exists(ytc_cookie_file) and os.access(ytc_cookie_file, os.R_OK):
+                    file_age = time.time() - os.path.getmtime(ytc_cookie_file)
+                    if file_age < 21600:  # 6 hours in seconds
+                        print(f"🍪 Using cached ytc cookies from {ytc_cookie_file}")
+                        return {
+                            'success': True,
+                            'source': 'ytc cached file',
+                            'opts': {'cookiefile': ytc_cookie_file}
+                        }
+            except (OSError, PermissionError) as e:
+                print(f"⚠️ Cannot access ytc cached cookies file: {e}")
             
             # Get fresh cookies from ytc service
             print("🔄 Fetching fresh cookies from ytc remote API...")
@@ -733,20 +789,27 @@ class YtDlpAPI:
                 # Convert cookie header to Netscape format and save to YTC-DL cookies.txt
                 netscape_cookies = self._convert_header_to_netscape(cookie_header)
                 
-                # Save to YTC-DL cookies.txt (primary location)
-                with open(ytc_dl_cookies, 'w') as f:
-                    f.write(netscape_cookies)
+                # Try to save to YTC-DL cookies.txt (primary location)
+                try:
+                    with open(ytc_dl_cookies, 'w') as f:
+                        f.write(netscape_cookies)
+                    print(f"✅ Saved fresh ytc cookies to {ytc_dl_cookies} (primary)")
+                except (OSError, PermissionError) as e:
+                    print(f"⚠️ Cannot write to primary cookies file: {e}")
                 
-                # Also save backup copy to ytc_youtube_cookies.txt
-                with open(ytc_cookie_file, 'w') as f:
-                    f.write(netscape_cookies)
+                # Try to save backup copy to ytc_youtube_cookies.txt
+                try:
+                    with open(ytc_cookie_file, 'w') as f:
+                        f.write(netscape_cookies)
+                    print(f"✅ Saved backup ytc cookies to {ytc_cookie_file}")
+                except (OSError, PermissionError) as e:
+                    print(f"⚠️ Cannot write to backup cookies file: {e}")
                 
-                print(f"✅ Saved fresh ytc cookies to {ytc_dl_cookies} (primary) and {ytc_cookie_file} (backup)")
-                
+                # Return success even if we couldn't save files, as long as we have cookies
                 return {
                     'success': True,
                     'source': 'ytc remote API (fresh)',
-                    'opts': {'cookiefile': ytc_dl_cookies}
+                    'opts': {'cookiefile': ytc_dl_cookies} if os.path.exists(ytc_dl_cookies) else {}
                 }
             else:
                 return {
@@ -799,47 +862,58 @@ class YtDlpAPI:
             'browser_youtube_cookies.txt'
         ]
         
-        cookiefile = opts.get('cookiefile')
-        if cookiefile:
-            # Handle specified cookie file
-            if not os.path.isabs(cookiefile):
-                # Relative path - look in centralized directory first
-                centralized_path = os.path.join(self.cookie_dir, cookiefile)
-                if os.path.exists(centralized_path):
-                    enhanced_opts['cookiefile'] = centralized_path
-                    print(f"🍪 Using cookie file from centralized directory: {centralized_path}")
-                    return enhanced_opts
-                
-                # Legacy path handling for backward compatibility
-                if cookiefile.startswith('yt_dlp/cookies/'):
-                    legacy_path = f'/app/{cookiefile}'
-                elif '/' not in cookiefile:
-                    legacy_path = f'/app/cookies/{cookiefile}'
+        try:
+            cookiefile = opts.get('cookiefile')
+            if cookiefile:
+                # Handle specified cookie file
+                if not os.path.isabs(cookiefile):
+                    # Relative path - look in centralized directory first
+                    centralized_path = os.path.join(self.cookie_dir, cookiefile)
+                    if os.path.exists(centralized_path) and os.access(centralized_path, os.R_OK):
+                        enhanced_opts['cookiefile'] = centralized_path
+                        print(f"🍪 Using cookie file from centralized directory: {centralized_path}")
+                        return enhanced_opts
+                    
+                    # Legacy path handling for backward compatibility
+                    if cookiefile.startswith('yt_dlp/cookies/'):
+                        legacy_path = f'/app/{cookiefile}'
+                    elif '/' not in cookiefile:
+                        legacy_path = f'/app/cookies/{cookiefile}'
+                    else:
+                        legacy_path = f'/app/{cookiefile}'
+                    
+                    # If legacy file exists, copy to centralized directory
+                    if os.path.exists(legacy_path) and os.access(legacy_path, os.R_OK):
+                        self._copy_to_centralized_dir(legacy_path, cookiefile)
+                        enhanced_opts['cookiefile'] = os.path.join(self.cookie_dir, cookiefile)
+                        return enhanced_opts
                 else:
-                    legacy_path = f'/app/{cookiefile}'
-                
-                # If legacy file exists, copy to centralized directory
-                if os.path.exists(legacy_path):
-                    self._copy_to_centralized_dir(legacy_path, cookiefile)
-                    enhanced_opts['cookiefile'] = os.path.join(self.cookie_dir, cookiefile)
-                    return enhanced_opts
+                    # Absolute path - copy to centralized directory if it exists
+                    if os.path.exists(cookiefile) and os.access(cookiefile, os.R_OK):
+                        filename = os.path.basename(cookiefile)
+                        self._copy_to_centralized_dir(cookiefile, filename)
+                        enhanced_opts['cookiefile'] = os.path.join(self.cookie_dir, filename)
+                        return enhanced_opts
             else:
-                # Absolute path - copy to centralized directory if it exists
-                if os.path.exists(cookiefile):
-                    filename = os.path.basename(cookiefile)
-                    self._copy_to_centralized_dir(cookiefile, filename)
-                    enhanced_opts['cookiefile'] = os.path.join(self.cookie_dir, filename)
-                    return enhanced_opts
-        else:
-            # No cookie file specified - look for default files in centralized directory
-            for filename in manual_cookie_files:
-                filepath = os.path.join(self.cookie_dir, filename)
-                if os.path.exists(filepath):
-                    enhanced_opts['cookiefile'] = filepath
-                    print(f"🍪 Found default cookie file: {filepath}")
-                    return enhanced_opts
+                # No cookie file specified - look for default files in centralized directory
+                for filename in manual_cookie_files:
+                    filepath = os.path.join(self.cookie_dir, filename)
+                    if os.path.exists(filepath) and os.access(filepath, os.R_OK):
+                        if not os.access(filepath, os.W_OK):
+                            # File exists but is not writable - create a copy
+                            writable_copy = self._create_writable_cookie_copy(filepath)
+                            if writable_copy:
+                                enhanced_opts['cookiefile'] = writable_copy
+                                print(f"🍪 Using writable copy of default cookie file: {filepath}")
+                                return enhanced_opts
+                        else:
+                            enhanced_opts['cookiefile'] = filepath
+                            print(f"🍪 Found default cookie file: {filepath}")
+                            return enhanced_opts
+        except (OSError, PermissionError) as e:
+            print(f"⚠️ Error handling manual cookies: {e}")
         
-        print("⚠️ No manual cookie files found in centralized directory")
+        print("⚠️ No accessible manual cookie files found - continuing without cookies")
         return enhanced_opts
     
     def _copy_to_centralized_dir(self, source_path, filename):
@@ -851,6 +925,31 @@ class YtDlpAPI:
             print(f"🔧 Copied cookie file to centralized directory: {dest_path}")
         except Exception as e:
             print(f"⚠️ Warning: Could not copy cookie file to centralized directory: {e}")
+
+    def _create_writable_cookie_copy(self, original_cookiefile):
+        """Create a writable copy of the cookie file in temp directory"""
+        import tempfile
+        
+        if not original_cookiefile or not os.path.exists(original_cookiefile):
+            return None
+            
+        try:
+            # Create a temporary file with the same content
+            temp_fd, temp_cookie_file = tempfile.mkstemp(suffix='.txt', prefix='yt-dlp-cookies-')
+            os.close(temp_fd)  # Close the file descriptor
+            
+            # Copy the original file content
+            shutil.copy2(original_cookiefile, temp_cookie_file)
+            
+            # Make sure it's writable
+            os.chmod(temp_cookie_file, 0o644)
+            
+            print(f"🍪 Created writable cookie copy: {temp_cookie_file}")
+            return temp_cookie_file
+            
+        except Exception as e:
+            print(f"⚠️ Failed to create writable cookie copy: {e}")
+            return None
     
     def get_available_cookie_files(self):
         """Get list of all available cookie files in centralized directory"""
