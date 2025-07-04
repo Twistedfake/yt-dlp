@@ -1944,203 +1944,69 @@ if os.path.exists(api_file):
                     
                     return jsonify(response_data)
                 
-                # If download or transcribe is requested
+                # If download or transcribe is requested, use the job queue
                 if should_download or should_transcribe:
-                    downloaded_videos = []
-                    transcriptions = []
+                    # Create a job for channel processing
+                    job_id = self.create_job(
+                        job_type='channel',
+                        total_items=len(videos),
+                        channel_url=channel_url,
+                        channel_title=channel_title,
+                        video_count=len(videos),
+                        download=should_download,
+                        transcribe=should_transcribe
+                    )
                     
-                    for i, video in enumerate(videos):
-                        video_url = f"https://www.youtube.com/watch?v={video['id']}"
-                        video_title = video.get('title', 'Unknown Title')
-                        
-                        try:
-                            video_result = {
-                                'id': video['id'],
-                                'title': video_title,
-                                'url': video_url,
-                                'duration': video.get('duration', 0),
-                                'upload_date': video.get('upload_date', ''),
-                                'success': True
-                            }
-                            
-                            # Download video if requested
-                            if should_download:
-                                # Configure download options
-                                download_opts = self._get_enhanced_ydl_opts(opts)
-                                download_opts.update({
-                                    'format': data.get('format', 'best[filesize<50M]'),
-                                    'writesubtitles': False,
-                                    'writeautomaticsub': False,
-                                    'writethumbnail': False,
-                                    'writeinfojson': False,
-                                    'postprocessors': [],
-                                    'quiet': True
-                                })
-                                
-                                # Download to memory
-                                from yt_dlp_memory_downloader import MemoryHttpFD
-                                
-                                class MemoryYDL(YoutubeDL):
-                                    def __init__(self, params=None):
-                                        super().__init__(params)
-                                        self.memory_downloader = None
-                                        
-                                    def dl(self, name, info, subtitle=False, test=False):
-                                        if not info.get('url'):
-                                            self.raise_no_formats(info, True)
-                                        self.memory_downloader = MemoryHttpFD(self, self.params)
-                                        success, real_download = self.memory_downloader.download(name, info, subtitle)
-                                        return success, real_download
-                                
-                                start_time = time.time()
-                                
-                                with MemoryYDL(download_opts) as ydl:
-                                    info = ydl.extract_info(video_url, download=True)
-                                    
-                                    if not ydl.memory_downloader:
-                                        raise Exception("No data downloaded")
-                                    
-                                    video_data = ydl.memory_downloader.get_downloaded_data()
-                                    
-                                    if not video_data:
-                                        raise Exception("No video data received")
-                                
-                                download_time = time.time() - start_time
-                                file_size = len(video_data)
-                                
-                                # Store video data as base64 for JSON response
-                                import base64
-                                video_result.update({
-                                    'file_size': file_size,
-                                    'download_time': round(download_time, 2),
-                                    'format': info.get('ext', 'unknown'),
-                                    'video_data': base64.b64encode(video_data).decode('utf-8')
-                                })
-                                
-                                # Transcribe if requested
-                                if should_transcribe:
-                                    try:
-                                        import whisper
-                                        import tempfile
-                                        
-                                        model = whisper.load_model(transcribe_model)
-                                        
-                                        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{info.get("ext", "mp4")}') as temp_file:
-                                            temp_file.write(video_data)
-                                            temp_path = temp_file.name
-                                        
-                                        try:
-                                            transcribe_start = time.time()
-                                            whisper_result = model.transcribe(temp_path, language=data.get('transcribe_language'))
-                                            transcribe_time = time.time() - transcribe_start
-                                            
-                                            if transcribe_format == 'text':
-                                                transcription = whisper_result['text']
-                                            else:
-                                                transcription = {
-                                                    'text': whisper_result['text'],
-                                                    'language': whisper_result.get('language', 'unknown'),
-                                                    'segments': whisper_result['segments'] if transcribe_format == 'json' else len(whisper_result['segments']),
-                                                    'model_used': transcribe_model,
-                                                    'transcribe_time': round(transcribe_time, 2)
-                                                }
-                                            
-                                            video_result['transcription'] = transcription
-                                            transcriptions.append({
-                                                'video_title': video_title,
-                                                'video_url': video_url,
-                                                'transcription': transcription
-                                            })
-                                        finally:
-                                            try:
-                                                os.unlink(temp_path)
-                                            except:
-                                                pass
-                                                
-                                    except ImportError:
-                                        video_result['transcription_error'] = 'Whisper not installed'
-                                    except Exception as e:
-                                        video_result['transcription_error'] = str(e)
-                            
-                            # Only transcribe without download
-                            elif should_transcribe:
-                                # Extract audio for transcription
-                                audio_opts = self._get_enhanced_ydl_opts(opts)
-                                audio_opts.update({
-                                    'format': 'bestaudio',
-                                    'quiet': True
-                                })
-                                
-                                import tempfile
-                                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
-                                    audio_path = temp_audio.name
-                                
-                                try:
-                                    audio_opts['outtmpl'] = audio_path.replace('.wav', '.%(ext)s')
-                                    audio_opts['postprocessors'] = [{
-                                        'key': 'FFmpegExtractAudio',
-                                        'preferredcodec': 'wav',
-                                        'preferredquality': '192',
-                                    }]
-                                    
-                                    with YoutubeDL(audio_opts) as ydl:
-                                        ydl.download([video_url])
-                                    
-                                    # Find extracted audio file
-                                    import glob
-                                    audio_files = glob.glob(audio_path.replace('.wav', '.*'))
-                                    if audio_files:
-                                        actual_audio_path = audio_files[0]
-                                        
-                                        # Transcribe
-                                        import whisper
-                                        model = whisper.load_model(transcribe_model)
-                                        
-                                        transcribe_start = time.time()
-                                        whisper_result = model.transcribe(actual_audio_path, language=data.get('transcribe_language'))
-                                        transcribe_time = time.time() - transcribe_start
-                                        
-                                        if transcribe_format == 'text':
-                                            transcription = whisper_result['text']
-                                        else:
-                                            transcription = {
-                                                'text': whisper_result['text'],
-                                                'language': whisper_result.get('language', 'unknown'),
-                                                'segments': whisper_result['segments'] if transcribe_format == 'json' else len(whisper_result['segments']),
-                                                'model_used': transcribe_model,
-                                                'transcribe_time': round(transcribe_time, 2)
-                                            }
-                                        
-                                        video_result['transcription'] = transcription
-                                        transcriptions.append({
-                                            'video_title': video_title,
-                                            'video_url': video_url,
-                                            'transcription': transcription
-                                        })
-                                finally:
-                                    # Clean up audio files
-                                    try:
-                                        for audio_file in glob.glob(audio_path.replace('.wav', '.*')):
-                                            if os.path.exists(audio_file):
-                                                os.unlink(audio_file)
-                                    except:
-                                        pass
-                            
-                            downloaded_videos.append(video_result)
-                            
-                        except Exception as e:
-                            video_result.update({
-                                'success': False,
-                                'error': str(e)
-                            })
-                            downloaded_videos.append(video_result)
+                    # Add job to queue
+                    job_data = {
+                        'job_id': job_id,
+                        'type': 'channel',
+                        'channel_url': channel_url,
+                        'channel_title': channel_title,
+                        'videos': videos,
+                        'max_videos': max_videos,
+                        'video_types': video_types,
+                        'download': should_download,
+                        'transcribe': should_transcribe,
+                        'transcribe_model': transcribe_model,
+                        'transcribe_format': transcribe_format,
+                        'options': opts,
+                        'enhanced_opts': enhanced_opts
+                    }
                     
-                    response_data['videos'] = downloaded_videos
-                    if transcriptions:
-                        response_data['transcriptions'] = transcriptions
-                        response_data['total_transcriptions'] = len(transcriptions)
+                    self.job_queue.add_job(job_data)
                     
-                    return jsonify(response_data)
+                    # Update job status
+                    self.update_job(job_id, status='queued')
+                    
+                    return jsonify({
+                        'success': True,
+                        'job_id': job_id,
+                        'status': 'queued',
+                        'message': f'Channel processing job queued successfully for "{channel_title}"',
+                        'channel_info': {
+                            'title': channel_title,
+                            'url': normalized_url,
+                            'total_videos': len(videos),
+                            'video_types': video_types,
+                            'download_requested': should_download,
+                            'transcribe_requested': should_transcribe
+                        },
+                        'queue_position': self.job_queue.queue.qsize(),
+                        'endpoints': {
+                            'status': f'/job/{job_id}',
+                            'results': f'/job/{job_id}/results',
+                            'videos': f'/job/{job_id}/download' if should_download else None,
+                            'transcriptions': f'/job/{job_id}/transcriptions' if should_transcribe else None
+                        },
+                        'queue_stats': self.job_queue.get_stats()
+                    })
+                    
+                # This should not be reached as job-based processing is used above
+                return jsonify({
+                    'success': False,
+                    'error': 'Invalid request state - job processing should handle download/transcribe requests'
+                }), 500
                 
             except Exception as e:
                 return jsonify({
