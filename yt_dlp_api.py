@@ -2572,7 +2572,13 @@ if os.path.exists(api_file):
                 
                 query = data['query']
                 video_type = data.get('type', 'video').lower()  # video, shorts, live, all
-                max_results = data.get('max_results', 10)
+                
+                # Convert max_results to int with error handling
+                try:
+                    max_results = int(data.get('max_results', 10))
+                except (ValueError, TypeError):
+                    return jsonify({'error': 'max_results must be a valid integer'}), 400
+                
                 sort_by = data.get('sort_by', 'relevance')  # relevance, date, views, rating
                 platform = data.get('platform', 'youtube').lower()  # youtube, tiktok, etc.
                 
@@ -2593,6 +2599,8 @@ if os.path.exists(api_file):
                 # Validate parameters
                 if max_results > 50:
                     return jsonify({'error': 'max_results cannot exceed 50'}), 400
+                if max_results < 1:
+                    return jsonify({'error': 'max_results must be at least 1'}), 400
                 
                 # Build search URL based on platform and type
                 search_url = self._build_search_url(platform, query, video_type, max_results, sort_by)
