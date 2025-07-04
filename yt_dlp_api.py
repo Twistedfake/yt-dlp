@@ -245,42 +245,80 @@ class JobQueue:
                     try:
                         import whisper
                         import tempfile
+                        import os
                         
                         model = whisper.load_model(transcribe_model)
                         
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{info.get("ext", "mp4")}') as temp_file:
-                            temp_file.write(video_data)
-                            temp_path = temp_file.name
-                        
-                        try:
-                            transcribe_options = {
-                                'language': transcribe_language,
-                                'task': 'transcribe'
-                            }
-                            whisper_result = model.transcribe(temp_path, **transcribe_options)
+                        # Create temporary directory for better file management
+                        with tempfile.TemporaryDirectory() as temp_dir:
+                            audio_path = os.path.join(temp_dir, 'audio.%(ext)s')
                             
-                            if transcribe_format == 'text':
-                                transcription = whisper_result['text']
-                            else:
-                                transcription = {
-                                    'text': whisper_result['text'],
-                                    'language': whisper_result.get('language', 'unknown'),
-                                    'segments': whisper_result['segments'],
-                                    'model_used': transcribe_model
-                                }
+                            # Configure audio extraction with more robust settings
+                            audio_opts = api_instance._get_enhanced_ydl_opts(opts)
+                            audio_opts.update({
+                                'format': 'bestaudio[filesize<30M]/bestaudio',
+                                'quiet': True,
+                                'no_warnings': True,
+                                'outtmpl': audio_path,
+                                'postprocessors': [{
+                                    'key': 'FFmpegExtractAudio',
+                                    'preferredcodec': 'mp3',
+                                    'preferredquality': '128',
+                                }]
+                            })
                             
-                            result['transcription'] = transcription
-                            
-                        finally:
                             try:
-                                os.unlink(temp_path)
-                            except:
-                                pass
+                                # Download audio for transcription
+                                with YoutubeDL(audio_opts) as ydl:
+                                    ydl.download([url])
+                                
+                                # Find extracted audio file
+                                import glob
+                                audio_files = glob.glob(os.path.join(temp_dir, 'audio.*'))
+                                if not audio_files:
+                                    raise Exception('Failed to extract audio - no audio files found')
+                                
+                                actual_audio_path = audio_files[0]
+                                
+                                # Verify audio file exists and has content
+                                if not os.path.exists(actual_audio_path):
+                                    raise Exception('Audio file does not exist after extraction')
+                                
+                                file_size = os.path.getsize(actual_audio_path)
+                                if file_size == 0:
+                                    raise Exception('Audio file is empty after extraction')
+                                
+                                print(f"Audio file ready for transcription: {actual_audio_path} ({file_size} bytes)")
+                                
+                                # Transcribe with error handling
+                                transcribe_options = {
+                                    'language': transcribe_language,
+                                    'task': 'transcribe',
+                                    'fp16': False,  # Disable FP16 for stability
+                                }
+                                
+                                whisper_result = model.transcribe(actual_audio_path, **transcribe_options)
+                                
+                                if transcribe_format == 'text':
+                                    transcription = whisper_result['text']
+                                else:
+                                    transcription = {
+                                        'text': whisper_result['text'],
+                                        'language': whisper_result.get('language', 'unknown'),
+                                        'segments': whisper_result['segments'],
+                                        'model_used': transcribe_model,
+                                        'audio_file_size': file_size
+                                    }
+                                
+                                result['transcription'] = transcription
+                                
+                            except Exception as e:
+                                result['transcription_error'] = f'Audio extraction failed: {str(e)}'
                                 
                     except ImportError:
                         result['transcription_error'] = 'Whisper not installed'
                     except Exception as e:
-                        result['transcription_error'] = str(e)
+                        result['transcription_error'] = f'Transcription setup failed: {str(e)}'
                 
                 # Store result
                 api_instance.add_job_result(job_id, result)
@@ -311,84 +349,95 @@ class JobQueue:
             import whisper
             import tempfile
             import glob
+            import os
             
             model = whisper.load_model(model_size)
             api_instance.update_job(job_id, progress=30, status_message='Extracting audio...')
             
-            # Extract audio
+            # Extract audio using more robust settings
             enhanced_opts = api_instance._get_enhanced_ydl_opts(opts)
             enhanced_opts.update({
-                'format': 'bestaudio',
-                'quiet': True
+                'format': 'bestaudio[filesize<30M]/bestaudio',
+                'quiet': True,
+                'no_warnings': True
             })
             
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
-                audio_path = temp_audio.name
+            # Create temporary directory for better file management
+            with tempfile.TemporaryDirectory() as temp_dir:
+                audio_path = os.path.join(temp_dir, 'audio.%(ext)s')
                 
-            try:
-                enhanced_opts['outtmpl'] = audio_path.replace('.wav', '.%(ext)s')
+                enhanced_opts['outtmpl'] = audio_path
                 enhanced_opts['postprocessors'] = [{
                     'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'wav',
-                    'preferredquality': '192',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '128',
                 }]
                 
-                with YoutubeDL(enhanced_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    title = info.get('title', 'Unknown')
-                    duration = info.get('duration', 0)
-                
-                api_instance.update_job(job_id, progress=60, status_message='Transcribing audio...')
-                
-                # Find extracted audio
-                audio_files = glob.glob(audio_path.replace('.wav', '.*'))
-                if not audio_files:
-                    raise Exception('Failed to extract audio')
-                
-                actual_audio_path = audio_files[0]
-                
-                # Transcribe
-                transcribe_options = {
-                    'language': language,
-                    'task': 'transcribe'
-                }
-                
-                result = model.transcribe(actual_audio_path, **transcribe_options)
-                
-                # Format result
-                transcription_result = {
-                    'success': True,
-                    'title': title,
-                    'duration': duration,
-                    'language': result.get('language', 'unknown'),
-                    'text': result['text'],
-                    'segments': result['segments'],
-                    'model_used': model_size,
-                    'format': response_format
-                }
-                
-                api_instance.add_job_result(job_id, transcription_result)
-                api_instance.update_job(job_id,
-                    status='completed',
-                    progress=100,
-                    completed_at=time.time(),
-                    result_summary=f"Transcribed: {title}"
-                )
-                
-                return True
-                
-            finally:
-                # Cleanup
                 try:
-                    for audio_file in glob.glob(audio_path.replace('.wav', '.*')):
-                        if os.path.exists(audio_file):
-                            os.unlink(audio_file)
-                except:
-                    pass
+                    with YoutubeDL(enhanced_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        title = info.get('title', 'Unknown')
+                        duration = info.get('duration', 0)
+                    
+                    api_instance.update_job(job_id, progress=60, status_message='Transcribing audio...')
+                    
+                    # Find extracted audio file
+                    audio_files = glob.glob(os.path.join(temp_dir, 'audio.*'))
+                    if not audio_files:
+                        raise Exception('Failed to extract audio - no audio files found')
+                    
+                    actual_audio_path = audio_files[0]
+                    
+                    # Verify audio file exists and has content
+                    if not os.path.exists(actual_audio_path):
+                        raise Exception('Audio file does not exist after extraction')
+                    
+                    file_size = os.path.getsize(actual_audio_path)
+                    if file_size == 0:
+                        raise Exception('Audio file is empty after extraction')
+                    
+                    print(f"Audio file ready: {actual_audio_path} ({file_size} bytes)")
+                    
+                    # Transcribe with error handling
+                    transcribe_options = {
+                        'language': language,
+                        'task': 'transcribe',
+                        'fp16': False,  # Disable FP16 for stability
+                    }
+                    
+                    result = model.transcribe(actual_audio_path, **transcribe_options)
+                    
+                    # Format result
+                    transcription_result = {
+                        'success': True,
+                        'title': title,
+                        'duration': duration,
+                        'language': result.get('language', 'unknown'),
+                        'text': result['text'],
+                        'segments': result['segments'],
+                        'model_used': model_size,
+                        'format': response_format,
+                        'audio_file_size': file_size
+                    }
+                    
+                    api_instance.add_job_result(job_id, transcription_result)
+                    api_instance.update_job(job_id,
+                        status='completed',
+                        progress=100,
+                        completed_at=time.time(),
+                        result_summary=f"Transcribed: {title}"
+                    )
+                    
+                    return True
+                    
+                except Exception as e:
+                    raise Exception(f'Audio extraction failed: {str(e)}')
                     
         except ImportError:
             raise Exception('OpenAI Whisper not installed')
-            
+        except Exception as e:
+            raise Exception(f'Transcription job failed: {str(e)}')
+    
     def _process_channel_job(self, job_data, api_instance):
         """Process channel download and transcription job"""
         try:
@@ -465,38 +514,59 @@ class JobQueue:
                         try:
                             import whisper
                             import tempfile
+                            import os
                             
                             model = whisper.load_model(transcribe_model)
                             
-                            # Download audio for transcription
+                            # Download audio for transcription with more robust settings
                             audio_opts = enhanced_opts.copy()
                             audio_opts.update({
-                                'format': 'bestaudio',
-                                'quiet': True
+                                'format': 'bestaudio[filesize<30M]/bestaudio',
+                                'quiet': True,
+                                'no_warnings': True
                             })
                             
-                            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
-                                audio_path = temp_audio.name
-                            
-                            try:
-                                audio_opts['outtmpl'] = audio_path.replace('.wav', '.%(ext)s')
+                            # Create temporary directory for better file management
+                            with tempfile.TemporaryDirectory() as temp_dir:
+                                audio_path = os.path.join(temp_dir, f'audio_{i}.%(ext)s')
+                                
+                                audio_opts['outtmpl'] = audio_path
                                 audio_opts['postprocessors'] = [{
                                     'key': 'FFmpegExtractAudio',
-                                    'preferredcodec': 'wav',
-                                    'preferredquality': '192',
+                                    'preferredcodec': 'mp3',
+                                    'preferredquality': '128',
                                 }]
                                 
-                                with YoutubeDL(audio_opts) as ydl:
-                                    ydl.download([video_url])
-                                
-                                # Find extracted audio file
-                                import glob
-                                audio_files = glob.glob(audio_path.replace('.wav', '.*'))
-                                if audio_files:
+                                try:
+                                    with YoutubeDL(audio_opts) as ydl:
+                                        ydl.download([video_url])
+                                    
+                                    # Find extracted audio file
+                                    import glob
+                                    audio_files = glob.glob(os.path.join(temp_dir, f'audio_{i}.*'))
+                                    if not audio_files:
+                                        raise Exception('Failed to extract audio - no audio files found')
+                                    
                                     actual_audio_path = audio_files[0]
                                     
-                                    # Transcribe
-                                    whisper_result = model.transcribe(actual_audio_path)
+                                    # Verify audio file exists and has content
+                                    if not os.path.exists(actual_audio_path):
+                                        raise Exception('Audio file does not exist after extraction')
+                                    
+                                    file_size = os.path.getsize(actual_audio_path)
+                                    if file_size == 0:
+                                        raise Exception('Audio file is empty after extraction')
+                                    
+                                    print(f"Audio file ready for {video_title}: {actual_audio_path} ({file_size} bytes)")
+                                    
+                                    # Transcribe with error handling
+                                    transcribe_options = {
+                                        'language': None,  # Let Whisper auto-detect
+                                        'task': 'transcribe',
+                                        'fp16': False,  # Disable FP16 for stability
+                                    }
+                                    
+                                    whisper_result = model.transcribe(actual_audio_path, **transcribe_options)
                                     
                                     if transcribe_format == 'text':
                                         transcription = whisper_result['text']
@@ -505,24 +575,19 @@ class JobQueue:
                                             'text': whisper_result['text'],
                                             'language': whisper_result.get('language', 'unknown'),
                                             'segments': whisper_result['segments'] if transcribe_format == 'json' else len(whisper_result['segments']),
-                                            'model_used': transcribe_model
+                                            'model_used': transcribe_model,
+                                            'audio_file_size': file_size
                                         }
                                     
                                     video_result['transcription'] = transcription
                                     
-                            finally:
-                                # Clean up audio files
-                                try:
-                                    for audio_file in glob.glob(audio_path.replace('.wav', '.*')):
-                                        if os.path.exists(audio_file):
-                                            os.unlink(audio_file)
-                                except:
-                                    pass
+                                except Exception as e:
+                                    video_result['transcription_error'] = f'Audio extraction failed: {str(e)}'
                                     
                         except ImportError:
                             video_result['transcription_error'] = 'Whisper not installed'
                         except Exception as e:
-                            video_result['transcription_error'] = str(e)
+                            video_result['transcription_error'] = f'Transcription setup failed: {str(e)}'
                     
                     api_instance.add_job_result(job_id, video_result)
                     
@@ -1110,7 +1175,7 @@ class YtDlpAPI:
         except Exception:
             return []
     
-    def _get_channel_entries_by_type(self, enhanced_opts, channel_url, video_types):
+    def _get_channel_entries_by_type(self, enhanced_opts, channel_url, video_types, max_videos=50):
         """Use yt-dlp's native tab handling to get different types of content"""
         all_entries = []
         
@@ -1146,19 +1211,26 @@ class YtDlpAPI:
             # Add /streams for live/stream content
             tab_urls.append(f"{channel_base}/streams")
         
+        # Calculate how many videos to get from each tab
+        videos_per_tab = max_videos // len(tab_urls) if tab_urls else max_videos
+        extra_videos = max_videos % len(tab_urls) if tab_urls else 0
+        
         # Extract from each tab URL with extract_flat for efficiency
-        for tab_url in tab_urls:
+        for i, tab_url in enumerate(tab_urls):
             try:
+                # Distribute extra videos among first few tabs
+                current_tab_limit = videos_per_tab + (1 if i < extra_videos else 0)
+                
                 # Use extract_flat for efficiency but process entries properly
                 extraction_opts = enhanced_opts.copy()
                 extraction_opts.update({
                     'extract_flat': True,  # Use extract_flat for speed
                     'quiet': True,
                     'no_warnings': True,
-                    'playlist_items': f'1-10',  # Limit to first 10 videos per tab for speed
+                    'playlist_items': f'1-{current_tab_limit}',  # Respect max_videos parameter
                 })
                 
-                print(f"Extracting from: {tab_url}")
+                print(f"Extracting from: {tab_url} (limit: {current_tab_limit})")
                 with YoutubeDL(extraction_opts) as ydl:
                     tab_info = ydl.extract_info(tab_url, download=False)
                     
@@ -2046,7 +2118,7 @@ if os.path.exists(api_file):
                     })
                     
                     # Use yt-dlp's native tab system to get videos by type
-                    all_videos = self._get_channel_entries_by_type(enhanced_opts, channel_url, video_types)
+                    all_videos = self._get_channel_entries_by_type(enhanced_opts, channel_url, video_types, max_videos)
                     videos = all_videos[:max_videos]
                     
                     # Get channel metadata from the main channel URL
