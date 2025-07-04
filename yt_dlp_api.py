@@ -2576,6 +2576,13 @@ if os.path.exists(api_file):
                 sort_by = data.get('sort_by', 'relevance')  # relevance, date, views, rating
                 platform = data.get('platform', 'youtube').lower()  # youtube, tiktok, etc.
                 
+                # Random results parameters
+                randomize_results = data.get('randomize', False)  # Enable random results
+                random_seed = data.get('random_seed', None)  # Optional seed for reproducible randomness
+                
+                # Creative Commons filtering
+                filter_creative_commons = data.get('creative_commons_only', False)  # Filter for CC licensed videos
+                
                 # Optional: download and transcribe results
                 download_results = data.get('download', False)
                 transcribe_results = data.get('transcribe', False)
@@ -2607,6 +2614,9 @@ if os.path.exists(api_file):
                         'transcribe_model': transcribe_model,
                         'transcribe_format': transcribe_format,
                         'options': opts,
+                        'randomize_results': randomize_results,
+                        'random_seed': random_seed,
+                        'creative_commons_only': filter_creative_commons,
                         'api_instance': self
                     }
                     
@@ -2634,7 +2644,10 @@ if os.path.exists(api_file):
                             'platform': platform,
                             'max_results': max_results,
                             'download': download_results,
-                            'transcribe': transcribe_results
+                            'transcribe': transcribe_results,
+                            'randomize': randomize_results,
+                            'random_seed': random_seed,
+                            'creative_commons_only': filter_creative_commons
                         },
                         'endpoints': {
                             'status': f'/job/{job_id}',
@@ -2668,6 +2681,12 @@ if os.path.exists(api_file):
                         videos = []
                         for entry in search_results.get('entries', []):
                             if entry:
+                                # Check Creative Commons filter
+                                if filter_creative_commons:
+                                    license_info = entry.get('license', '').lower()
+                                    if not any(cc_term in license_info for cc_term in ['creative commons', 'cc-', 'attribution']):
+                                        continue  # Skip non-CC videos
+                                
                                 video_info = {
                                     'id': entry.get('id'),
                                     'title': entry.get('title'),
@@ -2678,9 +2697,18 @@ if os.path.exists(api_file):
                                     'upload_date': entry.get('upload_date'),
                                     'thumbnail': entry.get('thumbnail'),
                                     'description': entry.get('description', '')[:200] + '...' if entry.get('description') and len(entry.get('description', '')) > 200 else entry.get('description', ''),
-                                    'type': self._classify_video_type(entry)
+                                    'type': self._classify_video_type(entry),
+                                    'license': entry.get('license', 'Unknown')  # Add license info
                                 }
                                 videos.append(video_info)
+                        
+                        # Randomize results if requested
+                        if randomize_results:
+                            import random
+                            if random_seed is not None:
+                                random.seed(random_seed)
+                            random.shuffle(videos)
+                            print(f"🎲 Randomized {len(videos)} search results")
                         
                         return jsonify({
                             'success': True,
@@ -2690,6 +2718,9 @@ if os.path.exists(api_file):
                             'total_results': len(videos),
                             'results': videos,
                             'search_url': search_url,
+                            'randomized': randomize_results,
+                            'random_seed': random_seed,
+                            'creative_commons_only': filter_creative_commons,
                             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
                         })
                         
@@ -2770,6 +2801,9 @@ if os.path.exists(api_file):
         transcribe = job_data.get('transcribe', False)
         transcribe_model = job_data.get('transcribe_model', 'base')
         transcribe_format = job_data.get('transcribe_format', 'json')
+        randomize_results = job_data.get('randomize_results', False)
+        random_seed = job_data.get('random_seed', None)
+        filter_creative_commons = job_data.get('filter_creative_commons', False)
         opts = job_data.get('options', {})
         
         api_instance.update_job(job_id, status='processing', progress=10, status_message='Searching...')
@@ -2790,6 +2824,15 @@ if os.path.exists(api_file):
                     raise Exception('No search results found')
                 
                 entries = [e for e in search_results.get('entries', []) if e]
+                
+                # Randomize entries if requested
+                if randomize_results:
+                    import random
+                    if random_seed is not None:
+                        random.seed(random_seed)
+                    random.shuffle(entries)
+                    print(f"🎲 Randomized {len(entries)} search entries")
+                
                 api_instance.update_job(job_id, 
                     total_items=len(entries),
                     progress=30,
@@ -2806,6 +2849,12 @@ if os.path.exists(api_file):
                             status_message=f'Processing video {i+1}/{len(entries)}'
                         )
                         
+                        # Check Creative Commons filter
+                        if filter_creative_commons:
+                            license_info = entry.get('license', '').lower()
+                            if not any(cc_term in license_info for cc_term in ['creative commons', 'cc-', 'attribution']):
+                                continue  # Skip non-CC videos
+                        
                         video_result = {
                             'index': i,
                             'id': entry.get('id'),
@@ -2816,6 +2865,7 @@ if os.path.exists(api_file):
                             'uploader': entry.get('uploader'),
                             'upload_date': entry.get('upload_date'),
                             'type': api_instance._classify_video_type(entry),
+                            'license': entry.get('license', 'Unknown'),
                             'success': True
                         }
                         
