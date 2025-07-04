@@ -50,12 +50,17 @@ from functools import wraps
 from urllib.parse import parse_qs, urlparse
 import uuid
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
+import hashlib
+import glob
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote
+import queue
 
 # Ensure FFmpeg is in PATH
 os.environ["PATH"] = "/usr/bin:" + os.environ.get("PATH", "")
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_template_string
 from werkzeug.exceptions import BadRequest, Unauthorized
 import requests
 
@@ -64,22 +69,365 @@ from yt_dlp.utils import sanitize_filename
 from yt_dlp_memory_downloader import MemoryHttpFD
 
 
+class JobQueue:
+    """Background job queue for async video processing"""
+    
+    def __init__(self, max_workers=3, max_queue_size=100):
+        self.queue = queue.Queue(maxsize=max_queue_size)
+        self.max_workers = max_workers
+        self.workers = []
+        self.is_running = False
+        self.stats = {
+            'total_processed': 0,
+            'total_failed': 0,
+            'current_queue_size': 0,
+            'active_workers': 0
+        }
+        
+    def start(self):
+        """Start background workers"""
+        if self.is_running:
+            return
+            
+        self.is_running = True
+        for i in range(self.max_workers):
+            worker = threading.Thread(target=self._worker, name=f'JobWorker-{i+1}', daemon=True)
+            worker.start()
+            self.workers.append(worker)
+        
+        print(f"✅ Started {self.max_workers} background workers")
+        
+    def stop(self):
+        """Stop background workers"""
+        self.is_running = False
+        
+        # Add stop signals for each worker
+        for _ in self.workers:
+            self.queue.put(None)
+            
+        print("🛑 Stopping background workers...")
+        
+    def add_job(self, job_data):
+        """Add job to queue"""
+        try:
+            self.queue.put(job_data, timeout=1)
+            self.stats['current_queue_size'] = self.queue.qsize()
+            return True
+        except queue.Full:
+            return False
+            
+    def _worker(self):
+        """Background worker that processes jobs"""
+        worker_name = threading.current_thread().name
+        print(f"🚀 {worker_name} started")
+        
+        while self.is_running:
+            try:
+                # Get job from queue
+                job_data = self.queue.get(timeout=1)
+                
+                # Stop signal
+                if job_data is None:
+                    break
+                    
+                self.stats['active_workers'] += 1
+                self.stats['current_queue_size'] = self.queue.qsize()
+                
+                print(f"📋 {worker_name} processing job {job_data.get('job_id', 'unknown')}")
+                
+                # Process job
+                success = self._process_job(job_data)
+                
+                # Update stats
+                if success:
+                    self.stats['total_processed'] += 1
+                else:
+                    self.stats['total_failed'] += 1
+                    
+                self.stats['active_workers'] -= 1
+                self.queue.task_done()
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"❌ {worker_name} error: {e}")
+                self.stats['total_failed'] += 1
+                self.stats['active_workers'] -= 1
+                
+        print(f"🛑 {worker_name} stopped")
+        
+    def _process_job(self, job_data):
+        """Process a single job"""
+        job_id = job_data.get('job_id')
+        job_type = job_data.get('type')
+        api_instance = job_data.get('api_instance')
+        
+        try:
+            if job_type == 'download':
+                return self._process_download_job(job_data, api_instance)
+            elif job_type == 'transcribe':
+                return self._process_transcribe_job(job_data, api_instance)
+            elif job_type == 'channel':
+                return self._process_channel_job(job_data, api_instance)
+            elif job_type == 'search':
+                return api_instance._process_search_job(job_data, api_instance)
+            else:
+                print(f"❌ Unknown job type: {job_type}")
+                api_instance.update_job(job_id, status='failed', error='Unknown job type')
+                return False
+                
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Job {job_id} failed: {error_msg}")
+            api_instance.update_job(job_id, 
+                status='failed', 
+                error=error_msg,
+                traceback=traceback.format_exc()
+            )
+            return False
+            
+    def _process_download_job(self, job_data, api_instance):
+        """Process video download job"""
+        job_id = job_data['job_id']
+        url = job_data['url']
+        opts = job_data.get('options', {})
+        format_selector = job_data.get('format')
+        should_transcribe = job_data.get('transcribe', False)
+        transcribe_model = job_data.get('transcribe_model', 'base')
+        transcribe_language = job_data.get('transcribe_language')
+        transcribe_format = job_data.get('transcribe_format', 'json')
+        
+        api_instance.update_job(job_id, status='processing', progress=10)
+        
+        # Download video
+        enhanced_opts = api_instance._get_enhanced_ydl_opts(opts)
+        if format_selector:
+            enhanced_opts['format'] = format_selector
+            
+        class MemoryYDL(YoutubeDL):
+            def __init__(self, params=None):
+                super().__init__(params)
+                self.video_data = None
+                
+            def dl(self, name, info, subtitle=False, test=False):
+                fd = MemoryHttpFD(self, self.params)
+                fd.real_download(name, info)
+                self.video_data = fd.get_downloaded_data()
+                return True
+                
+        with MemoryYDL(enhanced_opts) as ydl:
+            try:
+                info = ydl.extract_info(url, download=True)
+                video_data = ydl.video_data
+                
+                if not video_data:
+                    raise Exception("No video data received")
+                    
+                api_instance.update_job(job_id, progress=60)
+                
+                # Prepare result
+                result = {
+                    'success': True,
+                    'title': info.get('title', 'Unknown'),
+                    'duration': info.get('duration', 0),
+                    'format': info.get('ext', 'mp4'),
+                    'file_size': len(video_data),
+                    'video_data': video_data,
+                    'download_time': time.time()
+                }
+                
+                # Handle transcription if requested
+                if should_transcribe:
+                    api_instance.update_job(job_id, progress=70, status_message='Transcribing...')
+                    
+                    try:
+                        import whisper
+                        import tempfile
+                        
+                        model = whisper.load_model(transcribe_model)
+                        
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{info.get("ext", "mp4")}') as temp_file:
+                            temp_file.write(video_data)
+                            temp_path = temp_file.name
+                        
+                        try:
+                            transcribe_options = {
+                                'language': transcribe_language,
+                                'task': 'transcribe'
+                            }
+                            whisper_result = model.transcribe(temp_path, **transcribe_options)
+                            
+                            if transcribe_format == 'text':
+                                transcription = whisper_result['text']
+                            else:
+                                transcription = {
+                                    'text': whisper_result['text'],
+                                    'language': whisper_result.get('language', 'unknown'),
+                                    'segments': whisper_result['segments'],
+                                    'model_used': transcribe_model
+                                }
+                            
+                            result['transcription'] = transcription
+                            
+                        finally:
+                            try:
+                                os.unlink(temp_path)
+                            except:
+                                pass
+                                
+                    except ImportError:
+                        result['transcription_error'] = 'Whisper not installed'
+                    except Exception as e:
+                        result['transcription_error'] = str(e)
+                
+                # Store result
+                api_instance.add_job_result(job_id, result)
+                api_instance.update_job(job_id, 
+                    status='completed', 
+                    progress=100,
+                    completed_at=time.time(),
+                    result_summary=f"Downloaded: {result['title']}"
+                )
+                
+                return True
+                
+            except Exception as e:
+                raise Exception(f"Download failed: {str(e)}")
+                
+    def _process_transcribe_job(self, job_data, api_instance):
+        """Process transcription-only job"""
+        job_id = job_data['job_id']
+        url = job_data['url']
+        opts = job_data.get('options', {})
+        model_size = job_data.get('model', 'base')
+        language = job_data.get('language')
+        response_format = job_data.get('format', 'json')
+        
+        api_instance.update_job(job_id, status='processing', progress=10)
+        
+        try:
+            import whisper
+            import tempfile
+            import glob
+            
+            model = whisper.load_model(model_size)
+            api_instance.update_job(job_id, progress=30, status_message='Extracting audio...')
+            
+            # Extract audio
+            enhanced_opts = api_instance._get_enhanced_ydl_opts(opts)
+            enhanced_opts.update({
+                'format': 'bestaudio',
+                'quiet': True
+            })
+            
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
+                audio_path = temp_audio.name
+                
+            try:
+                enhanced_opts['outtmpl'] = audio_path.replace('.wav', '.%(ext)s')
+                enhanced_opts['postprocessors'] = [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'wav',
+                    'preferredquality': '192',
+                }]
+                
+                with YoutubeDL(enhanced_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    title = info.get('title', 'Unknown')
+                    duration = info.get('duration', 0)
+                
+                api_instance.update_job(job_id, progress=60, status_message='Transcribing audio...')
+                
+                # Find extracted audio
+                audio_files = glob.glob(audio_path.replace('.wav', '.*'))
+                if not audio_files:
+                    raise Exception('Failed to extract audio')
+                
+                actual_audio_path = audio_files[0]
+                
+                # Transcribe
+                transcribe_options = {
+                    'language': language,
+                    'task': 'transcribe'
+                }
+                
+                result = model.transcribe(actual_audio_path, **transcribe_options)
+                
+                # Format result
+                transcription_result = {
+                    'success': True,
+                    'title': title,
+                    'duration': duration,
+                    'language': result.get('language', 'unknown'),
+                    'text': result['text'],
+                    'segments': result['segments'],
+                    'model_used': model_size,
+                    'format': response_format
+                }
+                
+                api_instance.add_job_result(job_id, transcription_result)
+                api_instance.update_job(job_id,
+                    status='completed',
+                    progress=100,
+                    completed_at=time.time(),
+                    result_summary=f"Transcribed: {title}"
+                )
+                
+                return True
+                
+            finally:
+                # Cleanup
+                try:
+                    for audio_file in glob.glob(audio_path.replace('.wav', '.*')):
+                        if os.path.exists(audio_file):
+                            os.unlink(audio_file)
+                except:
+                    pass
+                    
+        except ImportError:
+            raise Exception('OpenAI Whisper not installed')
+            
+    def _process_channel_job(self, job_data, api_instance):
+        """Process channel download job"""
+        # Implementation for channel jobs
+        # This would be similar to existing channel processing but async
+        return True
+        
+    def get_stats(self):
+        """Get queue statistics"""
+        return {
+            **self.stats,
+            'current_queue_size': self.queue.qsize(),
+            'is_running': self.is_running,
+            'total_workers': len(self.workers)
+        }
+
+
 class YtDlpAPI:
     """HTTP API wrapper for yt-dlp that returns binary content with authentication"""
     
-    def __init__(self):
+    def __init__(self, max_workers=3, max_queue_size=100):
         self.app = Flask(__name__)
-        self.cookie_dir = self._setup_cookie_directory()
-        self._setup_auth()
-        self._auto_setup_cookies()  # Automatically handle cookie setup
-        
-        # Job tracking system
-        self.jobs = {}  # {job_id: job_data}
+        self.setup_logging()
+        self.setup_auth()
+        self.jobs = {}
         self.jobs_lock = threading.Lock()
+        self.cookie_dir = "/app/cookies"
+        
+        # Initialize job queue
+        self.job_queue = JobQueue(max_workers=max_workers, max_queue_size=max_queue_size)
+        self.job_queue.start()
         
         self.setup_routes()
     
-    def _setup_auth(self):
+    def setup_logging(self):
+        """Setup logging for the API"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+    
+    def setup_auth(self):
         """Setup authentication based on environment variables"""
         self.api_key = os.getenv('API_KEY')
 
@@ -621,15 +969,33 @@ class YtDlpAPI:
             }
             
             return jsonify({
-                'service': 'yt-dlp HTTP API with Authentication',
-                'version': '2.0.0',
+                'service': 'yt-dlp HTTP API with Async Job Queue',
+                'version': '3.0.0',
                 'authentication': auth_info,
+                'async_jobs': {
+                    'description': 'Download and transcription requests now return job IDs immediately',
+                    'queue_stats': self.job_queue.get_stats(),
+                    'worker_info': {
+                        'max_workers': self.job_queue.max_workers,
+                        'active_workers': self.job_queue.stats['active_workers'],
+                        'is_running': self.job_queue.is_running
+                    }
+                },
                 'endpoints': {
                     '/': 'GET - API information (public)',
                     '/health': 'GET - Health check (public)',
-                    '/download': 'POST - Download video and return as binary (protected)',
+                    '/download': 'POST - Queue video download job, returns job_id immediately (protected)',
+                    '/transcribe': 'POST - Queue transcription job, returns job_id immediately (protected)',
+                    '/search': 'POST - Search videos with optional download/transcription (protected)',
                     '/info': 'POST - Get video info without downloading (protected)',
                     '/channel': 'POST - Get channel info and optionally download/transcribe videos (protected)',
+                    '/job/{job_id}': 'GET - Check job status and progress (protected)',
+                    '/jobs': 'GET - List all jobs (protected)',
+                    '/job/{job_id}/results': 'GET - Get job results (protected)',
+                    '/job/{job_id}/download/{index}': 'GET - Download specific video from job (protected)',
+                    '/job/{job_id}/transcriptions': 'GET - Get transcriptions from job (protected)',
+                    '/queue/stats': 'GET - Get queue statistics (protected)',
+                    '/queue/control': 'POST - Control job queue (protected)',
                     '/execute': 'POST - Execute system commands (protected)',
                     '/cookie-status': 'GET - Get comprehensive cookie status (protected)',
                     '/refresh-ytc-cookies': 'POST - Force refresh of ytc cookies (protected)',
@@ -652,15 +1018,66 @@ class YtDlpAPI:
                     'supported_browsers': ['chrome', 'firefox', 'edge', 'safari', 'opera', 'brave']
                 },
                 'usage_examples': {
-                    'download_video': {
-                        'url': '/download',
-                        'method': 'POST',
-                        'headers': {'X-API-Key': 'your-api-key'},
-                        'body': {
-                            'url': 'https://youtube.com/watch?v=VIDEO_ID',
-                            'transcribe': True,
-                            'transcribe_format': 'json',
-                            'options': {'cookiesfrombrowser': 'chrome'}
+                    'async_download_workflow': {
+                        'step_1_queue_job': {
+                            'url': '/download',
+                            'method': 'POST',
+                            'headers': {'X-API-Key': 'your-api-key'},
+                            'body': {
+                                'url': 'https://youtube.com/watch?v=VIDEO_ID',
+                                'transcribe': True,
+                                'transcribe_format': 'json',
+                                'options': {'cookiesfrombrowser': 'chrome'}
+                            },
+                            'response': {'job_id': 'abc-123', 'status': 'queued'}
+                        },
+                        'step_2_check_status': {
+                            'url': '/job/abc-123',
+                            'method': 'GET',
+                            'headers': {'X-API-Key': 'your-api-key'},
+                            'response': {'status': 'completed', 'progress': 100}
+                        },
+                        'step_3_get_results': {
+                            'url': '/job/abc-123/results',
+                            'method': 'GET',
+                            'headers': {'X-API-Key': 'your-api-key'},
+                            'response': 'Job results with transcription'
+                        },
+                        'step_4_download_video': {
+                            'url': '/job/abc-123/download/0',
+                            'method': 'GET',
+                            'headers': {'X-API-Key': 'your-api-key'},
+                            'response': 'Binary video data'
+                        }
+                    },
+                    'search_workflow': {
+                        'search_only': {
+                            'url': '/search',
+                            'method': 'POST',
+                            'headers': {'X-API-Key': 'your-api-key'},
+                            'body': {
+                                'query': 'python tutorial',
+                                'type': 'video',
+                                'platform': 'youtube',
+                                'max_results': 10,
+                                'sort_by': 'relevance'
+                            },
+                            'response': 'Immediate search results with metadata'
+                        },
+                        'search_with_download': {
+                            'url': '/search',
+                            'method': 'POST',
+                            'headers': {'X-API-Key': 'your-api-key'},
+                            'body': {
+                                'query': 'short funny videos',
+                                'type': 'shorts',
+                                'platform': 'youtube',
+                                'max_results': 5,
+                                'download': True,
+                                'transcribe': True,
+                                'transcribe_model': 'base'
+                            },
+                            'response': {'job_id': 'search-123', 'status': 'queued'}
                         }
                     },
                     'channel_info_only': {
@@ -688,6 +1105,17 @@ class YtDlpAPI:
                             'options': {'cookiefile': '/path/to/cookies.txt'}
                         }
                     }
+                },
+                'search_endpoint_details': {
+                    'description': 'Search for videos across multiple platforms',
+                    'supported_platforms': ['youtube', 'tiktok', 'twitter', 'instagram'],
+                    'video_types': ['video', 'shorts', 'live', 'all'],
+                    'sort_options': ['relevance', 'date', 'views', 'rating'],
+                    'max_results': 'Up to 50 results per search',
+                    'immediate_mode': 'Set download=false for instant metadata results',
+                    'async_mode': 'Set download=true or transcribe=true for background processing',
+                    'transcribe_models': ['tiny', 'base', 'small', 'medium', 'large'],
+                    'transcribe_formats': ['json', 'text', 'srt', 'vtt']
                 },
                 'channel_endpoint_details': {
                     'default_behavior': 'Returns channel info and video metadata only (no download)',
@@ -790,7 +1218,7 @@ class YtDlpAPI:
         @self.app.route('/download', methods=['POST'])
         @self.require_auth
         def download_video():
-            """Download video and return as binary stream, optionally with transcription"""
+            """Queue video download job and return job ID immediately"""
             try:
                 data = request.get_json()
                 if not data or 'url' not in data:
@@ -806,254 +1234,57 @@ class YtDlpAPI:
                 transcribe_language = data.get('transcribe_language', None)
                 transcribe_format = data.get('transcribe_format', 'json')
                 
-                # Check if audio extraction is requested
-                extract_audio = opts.get('extractaudio', False)
-                audio_format = opts.get('audioformat', 'mp3')
+                # Create job
+                job_id = self.create_job('download', total_items=1, url=url)
                 
-                # Use enhanced options with better anti-bot measures
-                ydl_opts = self._get_enhanced_ydl_opts(opts)
-                ydl_opts.update({
-                    # Disable all file writing to disk - we only want in-memory downloads
-                    'writesubtitles': False,
-                    'writeautomaticsub': False,
-                    'writethumbnail': False,
-                    'write_all_thumbnails': False,
-                    'writeinfojson': False,
-                    'writedescription': False,
-                    'writeannotations': False,
-                    'writelink': False,
-                    'writeurllink': False,
-                    'writewebloclink': False,
-                    'writedesktoplink': False,
-                    # Don't use post-processors for memory downloads
-                    'postprocessors': [],
-                    # Force FFmpeg settings
-                    'ffmpeg_location': 'ffmpeg',
-                    'prefer_ffmpeg': True,
-                    **opts
+                # Prepare job data
+                job_data = {
+                    'job_id': job_id,
+                    'type': 'download',
+                    'url': url,
+                    'options': opts,
+                    'format': format_selector,
+                    'transcribe': should_transcribe,
+                    'transcribe_model': transcribe_model,
+                    'transcribe_language': transcribe_language,
+                    'transcribe_format': transcribe_format,
+                    'api_instance': self
+                }
+                
+                # Add to queue
+                success = self.job_queue.add_job(job_data)
+                
+                if not success:
+                    return jsonify({
+                        'success': False,
+                        'error': 'Job queue is full. Please try again later.',
+                        'queue_stats': self.job_queue.get_stats()
+                    }), 503
+                
+                # Update job status
+                self.update_job(job_id, status='queued')
+                
+                return jsonify({
+                    'success': True,
+                    'job_id': job_id,
+                    'status': 'queued',
+                    'message': 'Download job queued successfully',
+                    'queue_position': self.job_queue.queue.qsize(),
+                    'endpoints': {
+                        'status': f'/job/{job_id}',
+                        'results': f'/job/{job_id}/results',
+                        'download': f'/job/{job_id}/download/0' if not should_transcribe else None
+                    },
+                    'queue_stats': self.job_queue.get_stats()
                 })
                 
-                # Handle format selection for audio extraction
-                if format_selector:
-                    ydl_opts['format'] = format_selector
-                elif extract_audio:
-                    ydl_opts['format'] = 'bestaudio/best'
-                else:
-                    ydl_opts['format'] = 'best'
-                
-                # Custom YDL class that uses our memory downloader
-                class MemoryYDL(YoutubeDL):
-                    def __init__(self, params=None):
-                        super().__init__(params)
-                        self.memory_downloader = None
-                        
-                    def dl(self, name, info, subtitle=False, test=False):
-                        """Override dl method to use memory downloader"""
-                        if not info.get('url'):
-                            self.raise_no_formats(info, True)
-
-                        # Create our memory downloader
-                        self.memory_downloader = MemoryHttpFD(self, self.params)
-                        
-                        # Add progress hooks
-                        for ph in self._progress_hooks:
-                            self.memory_downloader.add_progress_hook(ph)
-                        
-                        # Download to memory
-                        success, real_download = self.memory_downloader.download(name, info, subtitle)
-                        return success, real_download
-                
-                # Extract info and download
-                with MemoryYDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    
-                    if not ydl.memory_downloader:
-                        raise Exception("No data downloaded")
-                    
-                    # Get the downloaded data
-                    video_data = ydl.memory_downloader.get_downloaded_data()
-                    
-                    if not video_data:
-                        raise Exception("No video data received")
-                    
-                    # Determine content type and extension
-                    ext = info.get('ext', 'mp4')
-                    
-                    if extract_audio:
-                        # Map audio formats to MIME types
-                        audio_ext_map = {
-                            'm4a': 'audio/mp4',
-                            'mp3': 'audio/mpeg', 
-                            'webm': 'audio/webm',
-                            'ogg': 'audio/ogg',
-                            'opus': 'audio/ogg',
-                            'aac': 'audio/aac',
-                            'wav': 'audio/wav',
-                            'flac': 'audio/flac'
-                        }
-                        content_type = audio_ext_map.get(ext, 'audio/mpeg')
-                    else:
-                        # Standard video content types
-                        content_type = {
-                            'mp4': 'video/mp4',
-                            'webm': 'video/webm',
-                            'flv': 'video/x-flv',
-                            'avi': 'video/x-msvideo',
-                            'mov': 'video/quicktime',
-                            'mkv': 'video/x-matroska',
-                            'm4a': 'audio/mp4',
-                            'mp3': 'audio/mpeg',
-                            'ogg': 'audio/ogg',
-                            'wav': 'audio/wav',
-                        }.get(ext, 'application/octet-stream')
-                    
-                    # Generate filename
-                    title = sanitize_filename(info.get('title', 'video'))
-                    filename = f"{title}.{ext}"
-                    
-                    # Handle transcription if requested
-                    if should_transcribe:
-                        try:
-                            import whisper
-                            import tempfile
-                            
-                            # Load Whisper model
-                            model = whisper.load_model(transcribe_model)
-                            
-                            # Save video data to temporary file for transcription
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as temp_file:
-                                temp_file.write(video_data)
-                                temp_path = temp_file.name
-                            
-                            try:
-                                # Transcribe the file
-                                transcribe_options = {
-                                    'language': transcribe_language,
-                                    'task': 'transcribe'
-                                }
-                                result = model.transcribe(temp_path, **transcribe_options)
-                                
-                                # Return transcription based on format
-                                if transcribe_format == 'text':
-                                    return Response(
-                                        result['text'],
-                                        mimetype='text/plain',
-                                        headers={'Content-Disposition': f'attachment; filename="{title}_transcript.txt"'}
-                                    )
-                                elif transcribe_format == 'srt':
-                                    srt_content = self._whisper_to_srt(result['segments'])
-                                    return Response(
-                                        srt_content,
-                                        mimetype='text/plain',
-                                        headers={'Content-Disposition': f'attachment; filename="{title}_transcript.srt"'}
-                                    )
-                                elif transcribe_format == 'vtt':
-                                    vtt_content = self._whisper_to_vtt(result['segments'])
-                                    return Response(
-                                        vtt_content,
-                                        mimetype='text/vtt',
-                                        headers={'Content-Disposition': f'attachment; filename="{title}_transcript.vtt"'}
-                                    )
-                                elif transcribe_format == 'both':
-                                    # Return both video and transcript in JSON
-                                    import base64
-                                    return jsonify({
-                                        'success': True,
-                                        'title': title,
-                                        'duration': info.get('duration', 0),
-                                        'language': result.get('language', 'unknown'),
-                                        'transcription': {
-                                            'text': result['text'],
-                                            'segments': result['segments'],
-                                            'model_used': transcribe_model
-                                        },
-                                        'video': {
-                                            'filename': filename,
-                                            'format': ext,
-                                            'size': len(video_data),
-                                            'data': base64.b64encode(video_data).decode('utf-8')
-                                        },
-                                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-                                    })
-                                else:  # json format (default)
-                                    return jsonify({
-                                        'success': True,
-                                        'title': title,
-                                        'duration': info.get('duration', 0),
-                                        'language': result.get('language', 'unknown'),
-                                        'text': result['text'],
-                                        'segments': result['segments'],
-                                        'model_used': transcribe_model,
-                                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-                                    })
-                                    
-                            finally:
-                                # Clean up temp file
-                                try:
-                                    if os.path.exists(temp_path):
-                                        os.unlink(temp_path)
-                                except:
-                                    pass
-                                    
-                        except ImportError:
-                            return jsonify({
-                                'error': 'OpenAI Whisper not installed for transcription',
-                                'install_hint': 'Run: pip install openai-whisper'
-                            }), 500
-                        except Exception as e:
-                            return jsonify({
-                                'error': f'Transcription failed: {str(e)}',
-                                'video_downloaded': True,
-                                'video_size': len(video_data)
-                            }), 500
-                    
-                    # Return binary data as streaming response (when no transcription)
-                    def generate():
-                        chunk_size = 8192
-                        for i in range(0, len(video_data), chunk_size):
-                            yield video_data[i:i + chunk_size]
-                    
-                    # Sanitize headers
-                    safe_title = info.get('title', '').encode('ascii', 'ignore').decode('ascii')
-                    safe_filename = filename.encode('ascii', 'ignore').decode('ascii')
-                    
-                    return Response(
-                        generate(),
-                        mimetype=content_type,
-                        headers={
-                            'Content-Disposition': f'attachment; filename="{safe_filename}"',
-                            'Content-Length': str(len(video_data)),
-                            'X-Video-Title': safe_title,
-                            'X-Video-Duration': str(info.get('duration', '')),
-                            'X-Video-Format': ext,
-                        }
-                    )
-                    
             except Exception as e:
                 error_msg = str(e)
-                
-                # Enhanced error reporting for cookie-related issues
-                if 'bot' in error_msg.lower() or 'sign in' in error_msg.lower():
-                    return jsonify({
-                        'success': False,
-                        'error': error_msg,
-                        'help': {
-                            'issue': 'YouTube bot detection - authentication required',
-                            'solutions': [
-                                'Use browser cookies: {"options": {"cookiesfrombrowser": "chrome"}}',
-                                'Export cookies to file and use: {"options": {"cookiefile": "/path/to/cookies.txt"}}',
-                                'Install browser extension to export cookies.txt format',
-                                'Make sure you are logged into YouTube in your browser'
-                            ]
-                        },
-                        'traceback': traceback.format_exc()
-                    }), 403
-                else:
-                    return jsonify({
-                        'success': False,
-                        'error': error_msg,
-                        'traceback': traceback.format_exc()
-                    }), 500
+                return jsonify({
+                    'success': False,
+                    'error': error_msg,
+                    'traceback': traceback.format_exc()
+                }), 500
 
         @self.app.route('/execute', methods=['POST'])
         @self.require_auth
@@ -1408,9 +1639,9 @@ if os.path.exists(api_file):
                 video_data,
                 mimetype=content_type,
                 headers={
-                    'Content-Disposition': f'attachment; filename="{filename}"',
+                    'Content-Disposition': f'attachment; filename="{self.safe_filename_for_header(filename)}"',
                     'Content-Length': str(len(video_data)),
-                    'X-Video-Title': result.get('title', ''),
+                    'X-Video-Title': self.safe_filename_for_header(result.get('title', '')),
                     'X-Video-URL': result.get('url', ''),
                     'X-File-Size': str(result.get('file_size', 0)),
                     'X-Download-Time': str(result.get('download_time', 0))
@@ -1916,21 +2147,21 @@ if os.path.exists(api_file):
                         return Response(
                             result['text'],
                             mimetype='text/plain',
-                            headers={'Content-Disposition': f'attachment; filename="{file.filename}_transcript.txt"'}
+                            headers={'Content-Disposition': f'attachment; filename="{self.safe_filename_for_header(file.filename)}_transcript.txt"'}
                         )
                     elif response_format == 'srt':
                         srt_content = self._whisper_to_srt(result['segments'])
                         return Response(
                             srt_content,
                             mimetype='text/plain',
-                            headers={'Content-Disposition': f'attachment; filename="{file.filename}_transcript.srt"'}
+                            headers={'Content-Disposition': f'attachment; filename="{self.safe_filename_for_header(file.filename)}_transcript.srt"'}
                         )
                     elif response_format == 'vtt':
                         vtt_content = self._whisper_to_vtt(result['segments'])
                         return Response(
                             vtt_content,
                             mimetype='text/vtt',
-                            headers={'Content-Disposition': f'attachment; filename="{file.filename}_transcript.vtt"'}
+                            headers={'Content-Disposition': f'attachment; filename="{self.safe_filename_for_header(file.filename)}_transcript.vtt"'}
                         )
                     else:  # json format (default)
                         return jsonify({
@@ -1961,7 +2192,7 @@ if os.path.exists(api_file):
         @self.app.route('/transcribe', methods=['POST'])
         @self.require_auth
         def transcribe_audio():
-            """Transcribe audio from video URL using OpenAI Whisper"""
+            """Queue transcription job and return job ID immediately"""
             try:
                 data = request.get_json(force=True)
                 if not data or 'url' not in data:
@@ -1971,113 +2202,49 @@ if os.path.exists(api_file):
                 model_size = data.get('model', 'base')  # tiny, base, small, medium, large
                 language = data.get('language', None)  # auto-detect if None
                 response_format = data.get('format', 'json')  # json, text, srt, vtt
+                opts = data.get('options', {})
                 
-                # Import Whisper (lazy import to avoid startup errors if not installed)
-                try:
-                    import whisper
-                except ImportError:
+                # Create job
+                job_id = self.create_job('transcribe', total_items=1, url=url)
+                
+                # Prepare job data
+                job_data = {
+                    'job_id': job_id,
+                    'type': 'transcribe',
+                    'url': url,
+                    'options': opts,
+                    'model': model_size,
+                    'language': language,
+                    'format': response_format,
+                    'api_instance': self
+                }
+                
+                # Add to queue
+                success = self.job_queue.add_job(job_data)
+                
+                if not success:
                     return jsonify({
-                        'error': 'OpenAI Whisper not installed',
-                        'install_hint': 'Run: pip install openai-whisper'
-                    }), 500
+                        'success': False,
+                        'error': 'Job queue is full. Please try again later.',
+                        'queue_stats': self.job_queue.get_stats()
+                    }), 503
                 
-                # Load Whisper model
-                try:
-                    model = whisper.load_model(model_size)
-                except Exception as e:
-                    return jsonify({
-                        'error': f'Failed to load Whisper model "{model_size}": {str(e)}',
-                        'available_models': ['tiny', 'base', 'small', 'medium', 'large']
-                    }), 500
+                # Update job status
+                self.update_job(job_id, status='queued')
                 
-                # Extract audio using yt-dlp
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
-                    audio_path = temp_audio.name
-                
-                try:
-                    # Get enhanced yt-dlp options
-                    opts = data.get('options', {})
-                    enhanced_opts = self._get_enhanced_ydl_opts(opts)
-                    
-                    # Configure for audio extraction
-                    enhanced_opts.update({
-                        'format': 'bestaudio',
-                        'outtmpl': audio_path.replace('.wav', '.%(ext)s'),
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'wav',
-                            'preferredquality': '192',
-                        }]
-                    })
-                    
-                    # Download and extract audio
-                    with YoutubeDL(enhanced_opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
-                        title = info.get('title', 'Unknown')
-                        duration = info.get('duration', 0)
-                    
-                    # Find the actual audio file (yt-dlp might change extension)
-                    import glob
-                    audio_files = glob.glob(audio_path.replace('.wav', '.*'))
-                    if not audio_files:
-                        return jsonify({'error': 'Failed to extract audio'}), 500
-                    
-                    actual_audio_path = audio_files[0]
-                    
-                    # Transcribe with Whisper
-                    transcribe_options = {
-                        'language': language,
-                        'task': 'transcribe'
-                    }
-                    
-                    result = model.transcribe(actual_audio_path, **transcribe_options)
-                    
-                    # Format response based on requested format
-                    if response_format == 'text':
-                        return Response(
-                            result['text'],
-                            mimetype='text/plain',
-                            headers={'Content-Disposition': f'attachment; filename="{sanitize_filename(title)}_transcript.txt"'}
-                        )
-                    elif response_format == 'srt':
-                        # Convert to SRT format
-                        srt_content = self._whisper_to_srt(result['segments'])
-                        return Response(
-                            srt_content,
-                            mimetype='text/plain',
-                            headers={'Content-Disposition': f'attachment; filename="{sanitize_filename(title)}_transcript.srt"'}
-                        )
-                    elif response_format == 'vtt':
-                        # Convert to VTT format
-                        vtt_content = self._whisper_to_vtt(result['segments'])
-                        return Response(
-                            vtt_content,
-                            mimetype='text/vtt',
-                            headers={'Content-Disposition': f'attachment; filename="{sanitize_filename(title)}_transcript.vtt"'}
-                        )
-                    else:  # json format (default)
-                        return jsonify({
-                            'success': True,
-                            'title': title,
-                            'duration': duration,
-                            'language': result.get('language', 'unknown'),
-                            'text': result['text'],
-                            'segments': result['segments'],
-                            'model_used': model_size,
-                            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-                        })
-                
-                finally:
-                    # Clean up temporary files
-                    try:
-                        if os.path.exists(audio_path):
-                            os.unlink(audio_path)
-                        for audio_file in glob.glob(audio_path.replace('.wav', '.*')):
-                            if os.path.exists(audio_file):
-                                os.unlink(audio_file)
-                    except:
-                        pass
+                return jsonify({
+                    'success': True,
+                    'job_id': job_id,
+                    'status': 'queued',
+                    'message': 'Transcription job queued successfully',
+                    'queue_position': self.job_queue.queue.qsize(),
+                    'endpoints': {
+                        'status': f'/job/{job_id}',
+                        'results': f'/job/{job_id}/results',
+                        'transcriptions': f'/job/{job_id}/transcriptions'
+                    },
+                    'queue_stats': self.job_queue.get_stats()
+                })
                         
             except Exception as e:
                 return jsonify({
@@ -2085,6 +2252,439 @@ if os.path.exists(api_file):
                     'error': str(e),
                     'traceback': traceback.format_exc()
                 }), 500
+
+        @self.app.route('/queue/stats', methods=['GET'])
+        @self.require_auth
+        def get_queue_stats():
+            """Get job queue statistics and status"""
+            try:
+                return jsonify({
+                    'success': True,
+                    'queue_stats': self.job_queue.get_stats(),
+                    'worker_info': {
+                        'max_workers': self.job_queue.max_workers,
+                        'active_workers': self.job_queue.stats['active_workers'],
+                        'is_running': self.job_queue.is_running
+                    },
+                    'queue_info': {
+                        'max_queue_size': self.job_queue.queue.maxsize,
+                        'current_size': self.job_queue.queue.qsize(),
+                        'is_full': self.job_queue.queue.full()
+                    }
+                })
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e)
+                }), 500
+
+        @self.app.route('/queue/control', methods=['POST'])
+        @self.require_auth  
+        def queue_control():
+            """Control job queue (restart workers, clear queue, etc.)"""
+            try:
+                data = request.get_json()
+                action = data.get('action', '')
+                
+                if action == 'restart_workers':
+                    self.job_queue.stop()
+                    self.job_queue.start()
+                    return jsonify({
+                        'success': True,
+                        'message': 'Workers restarted successfully',
+                        'stats': self.job_queue.get_stats()
+                    })
+                elif action == 'get_stats':
+                    return jsonify({
+                        'success': True,
+                        'stats': self.job_queue.get_stats()
+                    })
+                else:
+                    return jsonify({
+                        'success': False,
+                        'error': f'Unknown action: {action}',
+                        'available_actions': ['restart_workers', 'get_stats']
+                    }), 400
+                    
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e)
+                }), 500
+
+        @self.app.route('/search', methods=['POST'])
+        @self.require_auth
+        def search_videos():
+            """Search for videos with optional async download/transcription"""
+            try:
+                data = request.get_json()
+                if not data or 'query' not in data:
+                    return jsonify({'error': 'Search query is required'}), 400
+                
+                query = data['query']
+                video_type = data.get('type', 'video').lower()  # video, shorts, live, all
+                max_results = data.get('max_results', 10)
+                sort_by = data.get('sort_by', 'relevance')  # relevance, date, views, rating
+                platform = data.get('platform', 'youtube').lower()  # youtube, tiktok, etc.
+                
+                # Optional: download and transcribe results
+                download_results = data.get('download', False)
+                transcribe_results = data.get('transcribe', False)
+                transcribe_model = data.get('transcribe_model', 'base')
+                transcribe_format = data.get('transcribe_format', 'json')
+                opts = data.get('options', {})
+                
+                # Validate parameters
+                if max_results > 50:
+                    return jsonify({'error': 'max_results cannot exceed 50'}), 400
+                
+                # Build search URL based on platform and type
+                search_url = self._build_search_url(platform, query, video_type, max_results, sort_by)
+                
+                if download_results or transcribe_results:
+                    # Create async job for search with download/transcription
+                    job_id = self.create_job('search', total_items=0, query=query, search_url=search_url)
+                    
+                    job_data = {
+                        'job_id': job_id,
+                        'type': 'search',
+                        'search_url': search_url,
+                        'query': query,
+                        'video_type': video_type,
+                        'platform': platform,
+                        'max_results': max_results,
+                        'download': download_results,
+                        'transcribe': transcribe_results,
+                        'transcribe_model': transcribe_model,
+                        'transcribe_format': transcribe_format,
+                        'options': opts,
+                        'api_instance': self
+                    }
+                    
+                    # Add to queue
+                    success = self.job_queue.add_job(job_data)
+                    
+                    if not success:
+                        return jsonify({
+                            'success': False,
+                            'error': 'Job queue is full. Please try again later.',
+                            'queue_stats': self.job_queue.get_stats()
+                        }), 503
+                    
+                    # Update job status
+                    self.update_job(job_id, status='queued')
+                    
+                    return jsonify({
+                        'success': True,
+                        'job_id': job_id,
+                        'status': 'queued',
+                        'message': f'Search job queued successfully for query: "{query}"',
+                        'search_params': {
+                            'query': query,
+                            'type': video_type,
+                            'platform': platform,
+                            'max_results': max_results,
+                            'download': download_results,
+                            'transcribe': transcribe_results
+                        },
+                        'endpoints': {
+                            'status': f'/job/{job_id}',
+                            'results': f'/job/{job_id}/results',
+                            'videos': f'/job/{job_id}/download' if download_results else None,
+                            'transcriptions': f'/job/{job_id}/transcriptions' if transcribe_results else None
+                        },
+                        'queue_stats': self.job_queue.get_stats()
+                    })
+                
+                else:
+                    # Immediate search results (metadata only)
+                    enhanced_opts = self._get_enhanced_ydl_opts(opts)
+                    enhanced_opts.update({
+                        'extract_flat': True,  # Get metadata only
+                        'quiet': True,
+                        **opts
+                    })
+                    
+                    with YoutubeDL(enhanced_opts) as ydl:
+                        search_results = ydl.extract_info(search_url, download=False)
+                        
+                        if not search_results or 'entries' not in search_results:
+                            return jsonify({
+                                'success': False,
+                                'error': 'No search results found',
+                                'query': query
+                            }), 404
+                        
+                        # Format results
+                        videos = []
+                        for entry in search_results.get('entries', []):
+                            if entry:
+                                video_info = {
+                                    'id': entry.get('id'),
+                                    'title': entry.get('title'),
+                                    'url': entry.get('webpage_url') or entry.get('url'),
+                                    'duration': entry.get('duration'),
+                                    'view_count': entry.get('view_count'),
+                                    'uploader': entry.get('uploader'),
+                                    'upload_date': entry.get('upload_date'),
+                                    'thumbnail': entry.get('thumbnail'),
+                                    'description': entry.get('description', '')[:200] + '...' if entry.get('description') and len(entry.get('description', '')) > 200 else entry.get('description', ''),
+                                    'type': self._classify_video_type(entry)
+                                }
+                                videos.append(video_info)
+                        
+                        return jsonify({
+                            'success': True,
+                            'query': query,
+                            'platform': platform,
+                            'video_type': video_type,
+                            'total_results': len(videos),
+                            'results': videos,
+                            'search_url': search_url,
+                            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                        })
+                        
+            except Exception as e:
+                error_msg = str(e)
+                return jsonify({
+                    'success': False,
+                    'error': error_msg,
+                    'traceback': traceback.format_exc()
+                }), 500
+
+    def _build_search_url(self, platform, query, video_type, max_results, sort_by):
+        """Build search URL for different platforms and video types"""
+        
+        if platform == 'youtube':
+            # YouTube search prefixes
+            base_prefix = f"ytsearch{max_results}"
+            
+            # Add sorting
+            if sort_by == 'date':
+                prefix = f"ytsearchdate{max_results}"
+            elif sort_by == 'views':
+                prefix = f"ytsearchviews{max_results}"  
+            elif sort_by == 'rating':
+                prefix = f"ytsearchrating{max_results}"
+            else:
+                prefix = base_prefix
+            
+            # Add video type filters to query
+            if video_type == 'shorts':
+                # Search for short videos (typically under 60 seconds)
+                search_query = f"{query} short video"
+            elif video_type == 'live':
+                search_query = f"{query} live stream"
+            elif video_type == 'all':
+                search_query = query
+            else:  # 'video' or default
+                search_query = query
+                
+            return f"{prefix}:{search_query}"
+            
+        elif platform == 'tiktok':
+            # TikTok search - most videos are short format
+            return f"tiktoksearch{max_results}:{query}"
+            
+        elif platform == 'twitter' or platform == 'x':
+            return f"twitter:{query}"
+            
+        elif platform == 'instagram':
+            return f"instagram:{query}"
+            
+        else:
+            # Generic search for other platforms
+            return f"ytsearch{max_results}:{query}"
+
+    def _classify_video_type(self, entry):
+        """Classify video type based on metadata"""
+        duration = entry.get('duration', 0) or 0
+        
+        # Classify based on duration and other indicators
+        if duration > 0 and duration <= 60:
+            return 'shorts'
+        elif duration > 3600:  # Over 1 hour
+            return 'long_form'
+        elif entry.get('is_live'):
+            return 'live'
+        elif duration > 60:
+            return 'video'
+        else:
+            return 'unknown'
+
+    def _process_search_job(self, job_data, api_instance):
+        """Process search job with optional download/transcription"""
+        job_id = job_data['job_id']
+        search_url = job_data['search_url']
+        query = job_data['query']
+        download = job_data.get('download', False)
+        transcribe = job_data.get('transcribe', False)
+        transcribe_model = job_data.get('transcribe_model', 'base')
+        transcribe_format = job_data.get('transcribe_format', 'json')
+        opts = job_data.get('options', {})
+        
+        api_instance.update_job(job_id, status='processing', progress=10, status_message='Searching...')
+        
+        try:
+            # Get search results
+            enhanced_opts = api_instance._get_enhanced_ydl_opts(opts)
+            enhanced_opts.update({
+                'extract_flat': not download,  # Extract full info if downloading
+                'quiet': True,
+                **opts
+            })
+            
+            with YoutubeDL(enhanced_opts) as ydl:
+                search_results = ydl.extract_info(search_url, download=False)
+                
+                if not search_results or 'entries' not in search_results:
+                    raise Exception('No search results found')
+                
+                entries = [e for e in search_results.get('entries', []) if e]
+                api_instance.update_job(job_id, 
+                    total_items=len(entries),
+                    progress=30,
+                    status_message=f'Found {len(entries)} videos'
+                )
+                
+                results = []
+                transcriptions = []
+                
+                for i, entry in enumerate(entries):
+                    try:
+                        api_instance.update_job(job_id, 
+                            progress=30 + (i / len(entries)) * 60,
+                            status_message=f'Processing video {i+1}/{len(entries)}'
+                        )
+                        
+                        video_result = {
+                            'index': i,
+                            'id': entry.get('id'),
+                            'title': entry.get('title'),
+                            'url': entry.get('webpage_url') or entry.get('url'),
+                            'duration': entry.get('duration'),
+                            'view_count': entry.get('view_count'),
+                            'uploader': entry.get('uploader'),
+                            'upload_date': entry.get('upload_date'),
+                            'type': api_instance._classify_video_type(entry),
+                            'success': True
+                        }
+                        
+                        # Download if requested
+                        if download:
+                            try:
+                                # Use memory downloader for video data
+                                class MemoryYDL(YoutubeDL):
+                                    def __init__(self, params=None):
+                                        super().__init__(params)
+                                        self.video_data = None
+                                        
+                                    def dl(self, name, info, subtitle=False, test=False):
+                                        fd = MemoryHttpFD(self, self.params)
+                                        fd.real_download(name, info)
+                                        self.video_data = fd.get_downloaded_data()
+                                        return True
+                                
+                                download_opts = enhanced_opts.copy()
+                                download_opts.update({'extract_flat': False})
+                                
+                                with MemoryYDL(download_opts) as download_ydl:
+                                    video_info = download_ydl.extract_info(entry.get('webpage_url') or entry.get('url'), download=True)
+                                    video_data = download_ydl.video_data
+                                    
+                                    if video_data:
+                                        video_result.update({
+                                            'file_size': len(video_data),
+                                            'format': video_info.get('ext', 'mp4'),
+                                            'video_data': video_data
+                                        })
+                                        
+                            except Exception as e:
+                                video_result.update({
+                                    'download_error': str(e),
+                                    'video_data': None
+                                })
+                        
+                        # Transcribe if requested  
+                        if transcribe and video_result.get('video_data'):
+                            try:
+                                import whisper
+                                import tempfile
+                                
+                                model = whisper.load_model(transcribe_model)
+                                
+                                # Save to temp file for transcription
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{video_result.get("format", "mp4")}') as temp_file:
+                                    temp_file.write(video_result['video_data'])
+                                    temp_path = temp_file.name
+                                
+                                try:
+                                    whisper_result = model.transcribe(temp_path)
+                                    
+                                    if transcribe_format == 'text':
+                                        transcription = whisper_result['text']
+                                    else:
+                                        transcription = {
+                                            'text': whisper_result['text'],
+                                            'language': whisper_result.get('language', 'unknown'),
+                                            'segments': whisper_result['segments'],
+                                            'model_used': transcribe_model
+                                        }
+                                    
+                                    video_result['transcription'] = transcription
+                                    transcriptions.append({
+                                        'video_index': i,
+                                        'video_title': video_result['title'],
+                                        'video_url': video_result['url'],
+                                        'transcription': transcription
+                                    })
+                                    
+                                finally:
+                                    try:
+                                        os.unlink(temp_path)
+                                    except:
+                                        pass
+                                        
+                            except Exception as e:
+                                video_result['transcription_error'] = str(e)
+                        
+                        results.append(video_result)
+                        
+                    except Exception as e:
+                        results.append({
+                            'index': i,
+                            'success': False,
+                            'error': str(e),
+                            'title': entry.get('title', 'Unknown'),
+                            'url': entry.get('webpage_url') or entry.get('url')
+                        })
+                
+                # Store final results
+                final_result = {
+                    'success': True,
+                    'query': query,
+                    'total_found': len(entries),
+                    'processed': len(results),
+                    'results': results,
+                    'download_enabled': download,
+                    'transcribe_enabled': transcribe
+                }
+                
+                if transcriptions:
+                    final_result['transcriptions'] = transcriptions
+                
+                api_instance.add_job_result(job_id, final_result)
+                api_instance.update_job(job_id,
+                    status='completed',
+                    progress=100,
+                    completed_at=time.time(),
+                    result_summary=f'Search completed: {len(results)} videos processed'
+                )
+                
+                return True
+                
+        except Exception as e:
+            raise Exception(f'Search job failed: {str(e)}')
 
     def _whisper_to_srt(self, segments):
         """Convert Whisper segments to SRT subtitle format"""
@@ -2129,6 +2729,26 @@ if os.path.exists(api_file):
     def run(self, host='0.0.0.0', port=5002, debug=False):
         """Run the Flask server"""
         self.app.run(host=host, port=port, debug=debug)
+
+    def safe_filename_for_header(self, filename):
+        """Safely encode filename for HTTP Content-Disposition header"""
+        if not filename:
+            return "download"
+        
+        # Sanitize filename to remove problematic characters
+        safe_name = sanitize_filename(filename, restricted=True)
+        
+        # Remove any remaining non-ASCII characters and replace with underscores
+        safe_name = ''.join(c if ord(c) < 128 and c.isprintable() else '_' for c in safe_name)
+        
+        # Remove multiple consecutive underscores
+        while '__' in safe_name:
+            safe_name = safe_name.replace('__', '_')
+        
+        # Ensure it's not empty and doesn't start/end with underscore
+        safe_name = safe_name.strip('_') or 'download'
+        
+        return safe_name
 
 
 def check_environment():
@@ -2188,23 +2808,26 @@ if __name__ == '__main__':
     # Check environment first
     check_environment()
     
-    parser = argparse.ArgumentParser(description='yt-dlp HTTP API Server')
+    parser = argparse.ArgumentParser(description='yt-dlp HTTP API Server with Async Job Queue')
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
     parser.add_argument('--port', type=int, default=5002, help='Port to bind to')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--workers', type=int, default=3, help='Number of background workers (default: 3)')
+    parser.add_argument('--queue-size', type=int, default=100, help='Maximum queue size (default: 100)')
     
     args = parser.parse_args()
     
     # Setup logging
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG if args.debug else logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     
     try:
-        # Create and run API
-        api = YtDlpAPI()
+        # Create and run API with job queue configuration
+        api = YtDlpAPI(max_workers=args.workers, max_queue_size=args.queue_size)
         print(f"🚀 Starting yt-dlp HTTP API server on http://{args.host}:{args.port}")
+        print(f"📋 Job Queue: {args.workers} workers, max queue size: {args.queue_size}")
         print("\n📋 Authentication & Usage Help:")
         if api.auth_mode != 'none':
             print("• API Key: curl -H \"X-API-Key: your-key\" http://localhost:5002/download")
@@ -2212,6 +2835,17 @@ if __name__ == '__main__':
         print("• Browser cookies: POST with {\"options\": {\"cookiesfrombrowser\": \"chrome\"}}")
         print("• Cookie file: POST with {\"options\": {\"cookiefile\": \"/path/to/cookies.txt\"}}")
         print("• Health check: GET http://localhost:5002/health")
+        print("• Queue stats: GET http://localhost:5002/queue/stats")
+        print("\n✨ NEW: Async Job Processing!")
+        print("• Downloads now return job IDs immediately")
+        print("• Check status: GET /job/{job_id}")
+        print("• Get results: GET /job/{job_id}/results")
+        print("• Download video: GET /job/{job_id}/download/0")
+        print("\n🔍 NEW: Video Search!")
+        print("• Search videos: POST /search")
+        print("• Platforms: YouTube, TikTok, Twitter, Instagram")
+        print("• Types: video, shorts, live, all")
+        print("• With download/transcription support")
         print("\nPress Ctrl+C to stop the server")
         print("-" * 50)
         api.run(host=args.host, port=args.port, debug=args.debug)

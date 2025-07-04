@@ -1,17 +1,28 @@
 # yt-dlp API Format Guide
 
+## ✨ **NEW: Async Job Queue System**
+
+**All download and transcription requests now return job IDs immediately!** No more waiting for downloads to complete - queue your jobs and check progress separately.
+
+### 🚀 **Async Workflow:**
+1. **Queue Job** → Get job ID instantly
+2. **Check Status** → Monitor progress 
+3. **Get Results** → Download completed videos/transcriptions
+4. **Background Processing** → Multiple videos processed simultaneously
+
 ## Quick Reference Table
 
-| **Request Type** | **Endpoint** | **Description** |
-|------------------|--------------|-----------------|
-| **Video Only** | `/download` with `"bestvideo[height=720][ext=mp4]"` | 720p MP4 video without audio |
-| **Audio Only** | `/download` with `"bestaudio[ext=m4a]/bestaudio"` | Best audio in M4A format |
-| **Video + Audio** | `/download` with `"bestvideo[height=720][ext=mp4]+bestaudio[ext=m4a]/best"` | 720p video with audio combined |
-| **Channel Info** | `/channel` with defaults | Get channel info and video metadata (no download) |
-| **Channel Download** | `/channel` with `"download": true` | Download multiple videos from channel in single response |
-| **URL Transcription** | `/transcribe` with `"model": "base"` | Audio-to-text from URL using OpenAI Whisper |
-| **File Upload Transcription** | `/transcribe-file` with file upload | Transcribe uploaded MP4/MP3/audio files |
-| **Download + Transcribe** | `/download` with `"transcribe": true` | Download video and get transcription in one request |
+| **Request Type** | **Endpoint** | **Response** | **Description** |
+|------------------|--------------|--------------|-----------------|
+| **🎥 Video Download** | `/download` | `job_id` | Queue video download, returns job ID immediately |
+| **🎵 Audio Download** | `/download` with audio format | `job_id` | Queue audio extraction with job ID |
+| **📋 Channel Bulk** | `/channel` with `download: true` | `job_id` | Queue multiple video downloads from channel |
+| **🎤 Transcription** | `/transcribe` | `job_id` | Queue audio transcription with job ID |
+| **🔍 Video Search** | `/search` with `download: true` | `job_id` | Search and download videos with job ID |
+| **📊 Job Status** | `/job/{job_id}` | Status object | Check job progress and completion |
+| **📦 Job Results** | `/job/{job_id}/results` | Full results | Get all job data when completed |
+| **⬇️ Download Video** | `/job/{job_id}/download/0` | Binary data | Download specific video from job |
+| **📝 Get Transcriptions** | `/job/{job_id}/transcriptions` | Text/JSON | Get all transcriptions from job |
 
 ## Authentication
 
@@ -21,279 +32,9 @@ All API requests require authentication using the `X-API-Key` header:
 -H "X-API-Key: your_api_key"
 ```
 
-## Curl Examples
+## 🔄 **Async Workflow Examples**
 
-### 🎥 Video + Audio Download
-```bash
-curl -X POST http://localhost:5002/download \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
-    "format": "bestvideo[height=720][ext=mp4]+bestaudio[ext=m4a]/best"
-  }'
-```
-
-### 🎵 Audio-Only Download
-```bash
-curl -X POST http://localhost:5002/download \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
-    "format": "bestaudio[ext=m4a]/bestaudio"
-  }'
-```
-
-### 📹 Video-Only Download (No Audio)
-```bash
-curl -X POST http://localhost:5002/download \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
-    "format": "bestvideo[height=720][ext=mp4]"
-  }'
-```
-
-## Format String Syntax
-
-| **Symbol** | **Meaning** | **Example** |
-|------------|-------------|-------------|
-| `+` | Combine streams | `bestvideo+bestaudio` (merge video and audio) |
-| `/` | Fallback option | `format1/format2` (try format1, if fails use format2) |
-| `[...]` | Filter criteria | `[height=720]` (only 720p), `[ext=mp4]` (only MP4) |
-
-## Common Filter Options
-
-| **Filter** | **Description** | **Example** |
-|------------|-----------------|-------------|
-| `height=720` | Exact resolution | `bestvideo[height=720]` |
-| `height>=720` | Minimum resolution | `bestvideo[height>=720]` |
-| `ext=mp4` | File format | `bestvideo[ext=mp4]` |
-| `abr>=128` | Audio bitrate | `bestaudio[abr>=128]` |
-
-## Audio Conversion to MP3
-
-```bash
-curl -X POST http://localhost:5002/download \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
-    "format": "bestaudio",
-    "postprocessors": [{
-      "key": "FFmpegExtractAudio",
-      "preferredcodec": "mp3",
-      "preferredquality": "192"
-    }]
-  }'
-```
-
-## Quality Options
-
-| **Quality Level** | **Video Format** | **Audio Format** |
-|------------------|------------------|------------------|
-| **High Quality** | `bestvideo[height>=1080]` | `bestaudio[abr>=192]` |
-| **Medium Quality** | `bestvideo[height>=720]` | `bestaudio[abr>=128]` |
-| **Low Quality** | `bestvideo[height>=480]` | `bestaudio[abr>=96]` |
-
-## Advanced Examples
-
-### Download Best Available Quality (Any Format)
-```bash
-curl -X POST http://localhost:5002/download \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "format": "best"
-  }'
-```
-
-### Download 4K Video with High-Quality Audio
-```bash
-curl -X POST http://localhost:5002/download \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "format": "bestvideo[height>=2160]+bestaudio[abr>=192]/best"
-  }'
-```
-
-### Download with Multiple Fallback Options
-```bash
-curl -X POST http://localhost:5002/download \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "format": "bestvideo[height=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height=720]+bestaudio/best"
-  }'
-```
-
-## Common Use Cases
-
-### 1. YouTube Shorts (Vertical Videos)
-```json
-{
-  "url": "https://www.youtube.com/shorts/yFLFkdFvNh0",
-  "format": "bestvideo[height>=720]+bestaudio/best"
-}
-```
-
-### 2. Music Videos (Audio Focus)
-```json
-{
-  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  "format": "bestaudio[ext=m4a]/bestaudio",
-  "postprocessors": [{
-    "key": "FFmpegExtractAudio",
-    "preferredcodec": "mp3",
-    "preferredquality": "320"
-  }]
-}
-```
-
-### 3. Educational Content (Balanced Quality)
-```json
-{
-  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]"
-}
-```
-
-## Error Handling
-
-If a format isn't available, yt-dlp will try the next option after `/`. Always include a fallback:
-
-```json
-{
-  "format": "preferred_format/fallback_format/best"
-}
-```
-
-## Transcription with OpenAI Whisper
-
-The API includes audio transcription capabilities using OpenAI Whisper in multiple ways:
-
-### 📁 Upload File for Transcription
-
-Upload MP4, MP3, or any audio/video file directly:
-
-```bash
-curl -X POST http://localhost:5002/transcribe-file \
-  -H "X-API-Key: your_api_key" \
-  -F "file=@/path/to/video.mp4" \
-  -F "model=base" \
-  -F "format=json"
-```
-
-### 🎬 Download + Transcribe in One Request
-
-Download a video and get its transcription:
-
-```bash
-curl -X POST http://localhost:5002/download \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "transcribe": true,
-    "transcribe_model": "base",
-    "transcribe_format": "json"
-  }'
-```
-
-### 🔗 URL-Only Transcription
-
-Transcribe from URL without downloading:
-
-### 🎤 Basic Transcription (JSON)
-```bash
-curl -X POST http://localhost:5002/transcribe \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "model": "base",
-    "language": "en"
-  }'
-```
-
-### 📝 Transcription as Text File
-```bash
-curl -X POST http://localhost:5002/transcribe \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "format": "text",
-    "model": "base"
-  }' \
-  -o transcript.txt
-```
-
-### 🎬 Transcription as SRT Subtitles
-```bash
-curl -X POST http://localhost:5002/transcribe \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "format": "srt",
-    "model": "small"
-  }' \
-  -o subtitles.srt
-```
-
-### Whisper Model Options
-
-| **Model** | **Size** | **Speed** | **Accuracy** | **Use Case** |
-|-----------|----------|-----------|--------------|--------------|
-| `tiny` | ~39 MB | Fastest | Basic | Quick transcripts |
-| `base` | ~74 MB | Fast | Good | General use |
-| `small` | ~244 MB | Medium | Better | Balanced quality |
-| `medium` | ~769 MB | Slow | High | High accuracy |
-| `large` | ~1550 MB | Slowest | Highest | Best quality |
-
-### Transcription Formats
-
-| **Format** | **Output** | **Description** |
-|------------|------------|-----------------|
-| `json` | JSON response | Full transcript with segments and timing |
-| `text` | Plain text | Simple text file |
-| `srt` | SRT subtitles | Standard subtitle format |
-| `vtt` | WebVTT | Web video text tracks |
-| `both` | JSON with video + transcript | Video data (base64) + transcription |
-
-### 📤 File Upload Examples
-
-**Upload MP4 file:**
-```bash
-curl -X POST http://localhost:5002/transcribe-file \
-  -H "X-API-Key: your_api_key" \
-  -F "file=@video.mp4" \
-  -F "model=small" \
-  -F "format=srt" \
-  -o subtitles.srt
-```
-
-**Upload MP3 audio:**
-```bash
-curl -X POST http://localhost:5002/transcribe-file \
-  -H "X-API-Key: your_api_key" \
-  -F "file=@audio.mp3" \
-  -F "model=base" \
-  -F "language=en" \
-  -F "format=text" \
-  -o transcript.txt
-```
-
-### 🎯 Download + Transcribe Examples
-
-**Get video file + transcript JSON:**
+### **Step 1: Queue a Download Job**
 ```bash
 curl -X POST http://localhost:5002/download \
   -H "Content-Type: application/json" \
@@ -302,50 +43,7 @@ curl -X POST http://localhost:5002/download \
     "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     "format": "bestvideo[height=720]+bestaudio",
     "transcribe": true,
-    "transcribe_format": "both"
-  }'
-```
-
-**Download audio and get SRT subtitles:**
-```bash
-curl -X POST http://localhost:5002/download \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "format": "bestaudio",
-    "transcribe": true,
-    "transcribe_model": "small",
-    "transcribe_format": "srt"
-  }' \
-  -o video_subtitles.srt
-```
-
-## Channel Info & Downloads
-
-### **Updated `/channel` Endpoint:**
-- ✅ **Default Behavior**: Returns channel info and video metadata (no download)
-- ✅ **Native yt-dlp Integration**: Uses built-in tab handling (no manual URL parsing)
-- ✅ **Single HTTP Response**: All videos returned in one request when `download=true`
-- ✅ **Video Type Filtering**: Choose regular videos, shorts, streams, or all
-
-### **Parameters:**
-- `url` (required): Channel URL
-- `max_videos` (optional): Number of videos (default: 10)
-- `video_types` (optional): Array of `["regular", "shorts", "streams", "all"]` (default: `["regular"]`)
-- `download` (optional): Boolean to download videos as base64 data (default: false)
-- `transcribe` (optional): Boolean to transcribe videos (default: false)
-- `transcribe_model` (optional): Whisper model (tiny, base, small, medium, large)
-- `transcribe_format` (optional): Format (json, text, srt, vtt)
-- `options` (optional): yt-dlp options
-
-### **Get Channel Info Only (Default):**
-```bash
-curl -X POST http://localhost:5002/channel \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
-  -d '{
-    "url": "https://youtube.com/@channel_name"
+    "transcribe_model": "base"
   }'
 ```
 
@@ -353,34 +51,124 @@ curl -X POST http://localhost:5002/channel \
 ```json
 {
   "success": true,
-  "channel_title": "Channel Name",
-  "total_videos_found": 100,
-  "returned_videos": 10,
-  "video_types_filter": ["regular"],
-  "videos": [
+  "job_id": "abc-123-def-456",
+  "status": "queued",
+  "message": "Download job queued successfully",
+  "queue_position": 2,
+  "endpoints": {
+    "status": "/job/abc-123-def-456",
+    "results": "/job/abc-123-def-456/results",
+    "download": "/job/abc-123-def-456/download/0"
+  }
+}
+```
+
+### **Step 2: Check Job Status**
+```bash
+curl -X GET http://localhost:5002/job/abc-123-def-456 \
+  -H "X-API-Key: your_api_key"
+```
+
+**Response (In Progress):**
+```json
+{
+  "id": "abc-123-def-456",
+  "type": "download",
+  "status": "processing",
+  "progress_percent": 65,
+  "current_item": "Downloading video...",
+  "completed_items": 0,
+  "total_items": 1,
+  "created_at": "2024-01-15T10:30:00",
+  "updated_at": "2024-01-15T10:31:23"
+}
+```
+
+**Response (Completed):**
+```json
+{
+  "id": "abc-123-def-456",
+  "type": "download", 
+  "status": "completed",
+  "progress_percent": 100,
+  "completed_items": 1,
+  "total_items": 1,
+  "result_summary": "Downloaded: Rick Astley - Never Gonna Give You Up"
+}
+```
+
+### **Step 3: Get Job Results**
+```bash
+curl -X GET http://localhost:5002/job/abc-123-def-456/results \
+  -H "X-API-Key: your_api_key"
+```
+
+**Response:**
+```json
+{
+  "job_id": "abc-123-def-456",
+  "status": "completed",
+  "total_videos": 1,
+  "successful_downloads": 1,
+  "transcriptions_count": 1,
+  "results": [
     {
-      "id": "VIDEO_ID",
-      "title": "Video Title",
-      "url": "https://youtube.com/watch?v=VIDEO_ID",
-      "duration": 180,
-      "view_count": 1000
+      "title": "Rick Astley - Never Gonna Give You Up",
+      "file_size": 15728640,
+      "format": "mp4",
+      "download_time": 1705312345
+    }
+  ],
+  "transcriptions": [
+    {
+      "video_title": "Rick Astley - Never Gonna Give You Up",
+      "transcription": {
+        "text": "We're no strangers to love...",
+        "language": "en",
+        "segments": [...]
+      }
     }
   ]
 }
 ```
 
-### **Download 5 Videos with Transcription:**
+### **Step 4: Download the Video File**
 ```bash
-curl -X POST http://localhost:5002/channel \
+curl -X GET http://localhost:5002/job/abc-123-def-456/download/0 \
+  -H "X-API-Key: your_api_key" \
+  -o video.mp4
+```
+
+## 🔍 **NEW: Video Search with Async Processing**
+
+Search videos across multiple platforms with optional download and transcription:
+
+### **Basic Search (Info Only)**
+```bash
+curl -X POST http://localhost:5002/search \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your_api_key" \
   -d '{
-    "url": "https://youtube.com/@channel_name",
-    "max_videos": 5,
-    "video_types": ["regular", "shorts"],
+    "query": "python programming tutorial",
+    "platform": "youtube",
+    "max_results": 10,
+    "video_type": "video"
+  }'
+```
+
+### **Search + Download + Transcribe (Async)**
+```bash
+curl -X POST http://localhost:5002/search \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
+  -d '{
+    "query": "javascript tutorial",
+    "platform": "youtube", 
+    "max_results": 5,
+    "video_type": "all",
     "download": true,
     "transcribe": true,
-    "transcribe_model": "base",
+    "transcribe_model": "small",
     "transcribe_format": "json"
   }'
 ```
@@ -389,234 +177,456 @@ curl -X POST http://localhost:5002/channel \
 ```json
 {
   "success": true,
-  "channel_title": "Channel Name",
-  "videos": [
-    {
-      "id": "VIDEO_ID",
-      "title": "Video Title",
-      "file_size": 1024000,
-      "video_data": "base64_encoded_video_data",
-      "transcription": {
-        "text": "Transcribed text here...",
-        "language": "en",
-        "segments": [...]
-      }
-    }
-  ],
-  "transcriptions": [
-    {
-      "video_title": "Video Title",
-      "transcription": {...}
-    }
-  ]
+  "job_id": "search-789-xyz-123",
+  "status": "queued",
+  "message": "Search job queued successfully for query: \"javascript tutorial\"",
+  "search_params": {
+    "query": "javascript tutorial",
+    "type": "all",
+    "platform": "youtube",
+    "max_results": 5,
+    "download": true,
+    "transcribe": true
+  },
+  "endpoints": {
+    "status": "/job/search-789-xyz-123",
+    "results": "/job/search-789-xyz-123/results",
+    "transcriptions": "/job/search-789-xyz-123/transcriptions"
+  }
 }
 ```
 
-### **Get Only Shorts Info:**
+### **Search Platform Options**
+
+| **Platform** | **Value** | **Video Types Supported** |
+|--------------|-----------|---------------------------|
+| **YouTube** | `youtube` | video, shorts, live, all |
+| **TikTok** | `tiktok` | video, all |
+| **Twitter/X** | `twitter` | video, all |
+| **Instagram** | `instagram` | video, all |
+
+## 📋 **Enhanced Channel Processing**
+
+The `/channel` endpoint now supports async processing for bulk downloads:
+
+### **Channel Info Only (Sync)**
 ```bash
 curl -X POST http://localhost:5002/channel \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your_api_key" \
   -d '{
     "url": "https://youtube.com/@channel_name",
-    "max_videos": 20,
-    "video_types": ["shorts"]
+    "max_videos": 10,
+    "video_types": ["regular", "shorts"]
   }'
 ```
 
-## Data Storage & Response Format
-
-### **How It Works:**
-- **Single HTTP Response**: All videos returned in one JSON response when `download=true`
-- **Base64 Video Data**: Videos encoded as base64 strings for JSON compatibility
-- **Memory Only**: No files saved to disk, everything processed in memory
-- **Temporary Files**: Auto-deleted after transcription
-
-### **Response Size Considerations:**
-- **Small Videos** (≤50MB each): 5-10 videos per request recommended
-- **Large Videos** (>50MB each): 2-3 videos per request recommended
-- **Audio Only**: Can handle more videos due to smaller file sizes
-- **With Transcription**: Adds minimal data (~1KB per video)
-
-### **Example: 5 Videos with Transcription:**
-```json
-{
-  "url": "https://youtube.com/@channel_name", 
-  "max_videos": 5,
-  "download": true,
-  "transcribe": true,
-  "transcribe_model": "tiny",
-  "format": "bestaudio[filesize<30M]"
-}
+### **Channel Bulk Download (Async)**
+```bash
+curl -X POST http://localhost:5002/channel \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
+  -d '{
+    "url": "https://youtube.com/@channel_name",
+    "max_videos": 5,
+    "video_types": ["regular"],
+    "download": true,
+    "transcribe": true,
+    "transcribe_model": "base",
+    "format": "bestaudio[filesize<30M]"
+  }'
 ```
 
-**Response Structure:**
+**Returns job_id for async processing of multiple videos.**
+
+## 📊 **Job Management Endpoints**
+
+### **List All Jobs**
+```bash
+curl -X GET http://localhost:5002/jobs \
+  -H "X-API-Key: your_api_key"
+```
+
+### **Get Job Status**
+```bash
+curl -X GET http://localhost:5002/job/{job_id} \
+  -H "X-API-Key: your_api_key"
+```
+
+### **Get Job Transcriptions Only**
+```bash
+curl -X GET http://localhost:5002/job/{job_id}/transcriptions \
+  -H "X-API-Key: your_api_key"
+```
+
+### **Download Specific Video from Job**
+```bash
+# Download first video (index 0)
+curl -X GET http://localhost:5002/job/{job_id}/download/0 \
+  -H "X-API-Key: your_api_key" \
+  -o video_0.mp4
+
+# Download second video (index 1)  
+curl -X GET http://localhost:5002/job/{job_id}/download/1 \
+  -H "X-API-Key: your_api_key" \
+  -o video_1.mp4
+```
+
+## ⚡ **Queue Management**
+
+### **Get Queue Statistics**
+```bash
+curl -X GET http://localhost:5002/queue/stats \
+  -H "X-API-Key: your_api_key"
+```
+
+**Response:**
 ```json
 {
   "success": true,
-  "channel_title": "Channel Name",
-  "videos": [
-    {
-      "id": "abc123",
-      "title": "Video 1",
-      "file_size": 25600000,
-      "video_data": "base64EncodedVideoData...",
-      "transcription": {"text": "Full transcript...", "segments": [...]}
-    }
-  ],
-  "transcriptions": [...]
+  "queue_stats": {
+    "total_processed": 245,
+    "total_failed": 12,
+    "current_queue_size": 3,
+    "active_workers": 2
+  },
+  "worker_info": {
+    "max_workers": 3,
+    "active_workers": 2, 
+    "is_running": true
+  },
+  "queue_info": {
+    "max_queue_size": 100,
+    "current_size": 3,
+    "is_full": false
+  }
 }
 ```
 
-## Technical Details
+### **Restart Queue Workers**
+```bash
+curl -X POST http://localhost:5002/queue/control \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
+  -d '{"action": "restart_workers"}'
+```
 
-### File Format Support
-- **Audio**: MP3, M4A, WAV, FLAC, OGG, AAC, OPUS
-- **Video**: MP4, WEBM, AVI, MOV, MKV, FLV
-- **Any format supported by FFmpeg** (Whisper uses FFmpeg internally)
+## 🎯 **Legacy Sync Endpoints (Still Available)**
 
-### Memory Management
-- Temporary files automatically cleaned up
-- Efficient streaming for large files
-- Memory-optimized downloading
+Some endpoints still work synchronously for simple use cases:
 
-### Error Handling
-- Graceful fallbacks for missing Whisper installation
-- Detailed error messages for debugging
-- Timeout handling for large files
+### **Quick Video Info (Sync)**
+```bash
+curl -X POST http://localhost:5002/info \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
+  -d '{"url": "https://youtube.com/watch?v=VIDEO_ID"}'
+```
 
-### Security
-- Same authentication as existing API endpoints
-- File upload size limits (configurable)
-- Temporary file cleanup for security
+### **File Upload Transcription (Sync)**
+```bash
+curl -X POST http://localhost:5002/transcribe-file \
+  -H "X-API-Key: your_api_key" \
+  -F "file=@video.mp4" \
+  -F "model=base" \
+  -F "format=json"
+```
 
-## Channel Download Recommendations & Limits
+## 📝 **Job Status Types**
 
-### Response Size Limitations
-- **JSON Response Size**: Larger responses take longer to process and transfer
-- **Memory Usage**: All videos held in memory until response sent
-- **Base64 Encoding**: Increases data size by ~33% over binary
-- **Network Transfer**: Large responses may timeout on slow connections
+| **Status** | **Description** |
+|------------|-----------------|
+| `queued` | Job added to queue, waiting for worker |
+| `processing` | Job currently being processed |
+| `completed` | Job finished successfully |
+| `failed` | Job failed with error |
 
-### Recommended Limits by Video Type
+## ⚠️ **Rate Limits & Best Practices**
 
-| **Content Type** | **Max Videos** | **Reason** |
-|------------------|----------------|------------|
-| **Audio Only** | 10-15 videos | Smaller file sizes, manageable response |
-| **Video (720p)** | 3-5 videos | Larger files, avoid response timeouts |
-| **Video (1080p+)** | 2-3 videos | Very large files, memory constraints |
-| **With Transcription** | +0 videos | Transcription data is minimal (~1KB each) |
+### **Queue Limits**
+- **Max Queue Size**: 100 jobs (configurable)
+- **Max Workers**: 3 simultaneous jobs (configurable)
+- **Job Timeout**: 30 minutes per video
+- **Queue Full Response**: HTTP 503 with retry message
 
-### Example: Optimal Audio Downloads
+### **Recommended Usage**
+- **Small Videos** (≤50MB): 5-10 per job
+- **Large Videos** (>50MB): 2-3 per job  
+- **Audio Only**: 10-15 per job
+- **With Transcription**: Same limits (minimal overhead)
+
+### **Performance Optimization**
+```bash
+# Good: Queue multiple small jobs
+curl -X POST /download -d '{"url": "...", "format": "bestaudio[filesize<30M]"}'
+
+# Better: Use channel endpoint for bulk
+curl -X POST /channel -d '{"url": "...", "max_videos": 5, "download": true}'
+
+# Best: Search + download in one job
+curl -X POST /search -d '{"query": "...", "max_results": 5, "download": true}'
+```
+
+## 🔧 **Server Configuration**
+
+### **Starting with Custom Queue Settings**
+```bash
+python yt_dlp_api.py --workers 5 --queue-size 200 --port 5002
+```
+
+### **Environment Variables**
+```bash
+export API_KEY="your-secret-api-key"
+export WORKERS=3
+export QUEUE_SIZE=100
+```
+
+## 🎬 **Transcription with OpenAI Whisper**
+
+### **Async Transcription Job**
+```bash
+curl -X POST http://localhost:5002/transcribe \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
+  -d '{
+    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "model": "small",
+    "language": "en",
+    "format": "srt"
+  }'
+```
+
+**Response:**
 ```json
 {
-  "url": "https://youtube.com/@channel_name",
-  "max_videos": 10,
-  "video_types": ["regular"],
-  "download": true,
-  "format": "bestaudio[filesize<30M]"
+  "success": true,
+  "job_id": "transcribe-456-abc-789",
+  "status": "queued",
+  "message": "Transcription job queued successfully",
+  "endpoints": {
+    "status": "/job/transcribe-456-abc-789",
+    "results": "/job/transcribe-456-abc-789/results",
+    "transcriptions": "/job/transcribe-456-abc-789/transcriptions"
+  }
 }
 ```
 
-### Example: Conservative Video Downloads
+### **Download + Transcribe in One Job**
+```bash
+curl -X POST http://localhost:5002/download \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
+  -d '{
+    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "format": "bestvideo[height=720]+bestaudio",
+    "transcribe": true,
+    "transcribe_model": "base",
+    "transcribe_format": "both"
+  }'
+```
+
+### **Whisper Model Options**
+
+| **Model** | **Size** | **Speed** | **Accuracy** | **Async Recommended** |
+|-----------|----------|-----------|--------------|----------------------|
+| `tiny` | ~39 MB | Fastest | Basic | ✅ Good for bulk jobs |
+| `base` | ~74 MB | Fast | Good | ✅ Balanced choice |
+| `small` | ~244 MB | Medium | Better | ✅ High quality |
+| `medium` | ~769 MB | Slow | High | ⚠️ Use for important content |
+| `large` | ~1550 MB | Slowest | Highest | ❌ Not recommended for async |
+
+### **Transcription Formats**
+
+| **Format** | **Output** | **Use Case** |
+|------------|------------|--------------|
+| `json` | Full segments + timing | API integration |
+| `text` | Plain text only | Simple transcripts |
+| `srt` | SRT subtitles | Video players |
+| `vtt` | WebVTT subtitles | Web players |
+| `both` | Video data + transcript | Complete package |
+
+## 🔄 **Migration from Sync to Async**
+
+### **Old Sync Way:**
+```bash
+# This still works but blocks until complete
+curl -X POST /download -d '{"url": "..."}' 
+# Returns video data after 30-60 seconds
+```
+
+### **New Async Way:**
+```bash
+# Step 1: Queue (instant response)
+curl -X POST /download -d '{"url": "..."}' 
+# Returns: {"job_id": "abc-123"}
+
+# Step 2: Check status (optional)
+curl -X GET /job/abc-123
+# Returns: {"status": "processing", "progress": 45}
+
+# Step 3: Get results when ready
+curl -X GET /job/abc-123/results
+# Returns: Full job data
+
+# Step 4: Download video
+curl -X GET /job/abc-123/download/0 -o video.mp4
+```
+
+## 🔌 **API Information Endpoint**
+
+### **Get Full API Capabilities**
+```bash
+curl -X GET http://localhost:5002/ 
+```
+
+**Response includes:**
+- Authentication requirements
+- Queue statistics 
+- Available endpoints
+- Async workflow examples
+- Worker information
+
+## 🐳 **Docker & Deployment**
+
+### **Docker with Queue Configuration**
+```yaml
+# docker-compose.yml
+services:
+  yt-dlp-api:
+    build: .
+    environment:
+      - API_KEY=your-secret-key
+      - WORKERS=5
+      - QUEUE_SIZE=200
+    command: ["python", "yt_dlp_api.py", "--workers", "5", "--queue-size", "200"]
+```
+
+### **Health Check**
+```bash
+curl -X GET http://localhost:5002/health
+```
+
+**Response:**
 ```json
 {
-  "url": "https://youtube.com/@channel_name", 
-  "max_videos": 3,
-  "video_types": ["regular"],
-  "download": true,
-  "transcribe": true,
-  "format": "bestvideo[height<=720]+bestaudio"
+  "status": "healthy",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "queue_stats": {
+    "active_workers": 2,
+    "queue_size": 5,
+    "is_running": true
+  }
 }
 ```
 
-### YouTube Rate Limits & Best Practices
-- **No Official Limits**: YouTube doesn't publish specific rate limits for yt-dlp
-- **Single Request Processing**: All videos downloaded sequentially in one request
-- **IP-based Throttling**: YouTube may throttle or block aggressive downloading
-- **Best Practices**:
-  - Keep `max_videos` ≤ 10 for regular use
-  - Use audio-only formats to reduce bandwidth
-  - Avoid repeated requests to same channel
-  - Use appropriate video type filters
+## 🎯 **Complete Example: Bulk Channel Processing**
 
-### Error Handling
-- **Response Timeouts**: Reduce `max_videos` or use audio-only formats
-- **403 Forbidden**: Possible IP block - wait 30-60 minutes
-- **Memory Errors**: Reduce `max_videos` or video quality
-- **Large Response**: Use `/info` endpoint first to check video count
-
-### Performance Recommendations by Server
-
-| **Server Specs** | **Audio Max** | **Video Max** | **Transcribe** |
-|------------------|---------------|---------------|----------------|
-| 2GB RAM / 1vCPU | 8 videos | 2 videos | tiny model only |
-| 4GB RAM / 1vCPU | 12 videos | 3 videos | base model |
-| 8GB RAM / 2vCPU | 15 videos | 5 videos | small model |
-| 16GB RAM / 4vCPU | 20 videos | 8 videos | medium model |
-
-### Transcription Considerations
-- **Model Selection**: Use `tiny` for speed, `base` for balance, `small`+ for accuracy
-- **Memory Impact**: ~200MB RAM per transcription job
-- **Processing Time**: 10-60 seconds per video depending on model and length
-- **Combined Operations**: Transcription adds minimal response size but processing time
-
-## Performance Notes
-
-### Model Download Times (First Use)
-- **tiny**: ~2 seconds
-- **base**: ~5 seconds  
-- **small**: ~15 seconds
-- **medium**: ~45 seconds
-- **large**: ~90 seconds
-
-### Processing Speed (After Download)
-- **tiny**: ~10x real-time
-- **base**: ~5x real-time
-- **small**: ~2x real-time
-- **medium**: ~1x real-time
-- **large**: ~0.5x real-time
-
-*Times vary based on CPU/GPU availability*
-
-## Testing
-
-### Test Scripts
-- `test_transcription.py` - Tests URL transcription functionality
-- `test_file_upload.py` - Tests file upload transcription
-- Both include comprehensive error handling and format testing
-
-### Running Tests
 ```bash
-# Set API key
-export API_KEY="your_api_key"
+# 1. Queue channel download job
+RESPONSE=$(curl -s -X POST http://localhost:5002/channel \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
+  -d '{
+    "url": "https://youtube.com/@channel_name",
+    "max_videos": 10,
+    "video_types": ["regular", "shorts"],
+    "download": true,
+    "transcribe": true,
+    "transcribe_model": "base",
+    "format": "bestaudio[filesize<25M]"
+  }')
 
-# Test URL transcription
-python test_transcription.py
+# 2. Extract job ID
+JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
+echo "Job ID: $JOB_ID"
 
-# Test file upload (requires test file)
-python test_file_upload.py
+# 3. Monitor progress
+while true; do
+  STATUS=$(curl -s -X GET http://localhost:5002/job/$JOB_ID \
+    -H "X-API-Key: your_api_key" | jq -r '.status')
+  
+  if [ "$STATUS" = "completed" ]; then
+    echo "Job completed!"
+    break
+  elif [ "$STATUS" = "failed" ]; then
+    echo "Job failed!"
+    break
+  else
+    echo "Status: $STATUS"
+    sleep 10
+  fi
+done
+
+# 4. Get results
+curl -s -X GET http://localhost:5002/job/$JOB_ID/results \
+  -H "X-API-Key: your_api_key" | jq .
+
+# 5. Download all videos
+curl -s -X GET http://localhost:5002/job/$JOB_ID/results \
+  -H "X-API-Key: your_api_key" | jq -r '.results | length' | \
+while read -r count; do
+  for i in $(seq 0 $((count-1))); do
+    curl -X GET http://localhost:5002/job/$JOB_ID/download/$i \
+      -H "X-API-Key: your_api_key" \
+      -o "video_$i.mp4"
+  done
+done
 ```
 
-## Installation
+## 🚀 **Performance Benefits**
 
-### Local Development
+### **Before (Sync):**
+- ❌ Client waits 30-60 seconds per video
+- ❌ One video at a time  
+- ❌ Connection timeouts on large files
+- ❌ No progress visibility
+
+### **After (Async):**
+- ✅ Instant job ID response (< 1 second)
+- ✅ 3 videos processed simultaneously
+- ✅ No connection timeouts
+- ✅ Real-time progress monitoring
+- ✅ Background processing continues if client disconnects
+- ✅ Results available anytime after completion
+
+## 🔍 **Troubleshooting**
+
+### **Queue Full (HTTP 503)**
+```json
+{
+  "success": false,
+  "error": "Job queue is full. Please try again later.",
+  "queue_stats": {"current_queue_size": 100}
+}
+```
+**Solution:** Wait or increase queue size with `--queue-size` parameter.
+
+### **Job Not Found (HTTP 404)**
+```json
+{"error": "Job not found"}
+```
+**Solution:** Check job ID spelling or use `/jobs` to list all jobs.
+
+### **Worker Errors**
 ```bash
-pip install openai-whisper torch torchaudio
+# Restart workers
+curl -X POST /queue/control -d '{"action": "restart_workers"}'
 ```
 
-### Docker Build
-```bash
-docker compose build --no-cache
-```
+## 📚 **API Version History**
 
-### VPS Deployment
-- All dependencies included in Docker image
-- No additional configuration needed
-- Works with existing cookie management system
+- **v3.0.0**: Async job queue system, search functionality
+- **v2.0.0**: Channel processing, enhanced transcription
+- **v1.0.0**: Basic download and transcription
 
-## API Response
+---
 
-**Download endpoints** return video/audio in the response as binary
+## 💡 **Tips for Optimal Usage**
 
-**Transcription endpoint** returns JSON or text based on format parameter
+1. **Use async endpoints** for any job that might take >10 seconds
+2. **Monitor queue stats** to avoid hitting limits
+3. **Use appropriate video quality** to manage file sizes
+4. **Batch similar jobs** using channel or search endpoints
+5. **Check job status periodically** rather than polling continuously
+6. **Use audio formats** for faster transcription jobs
+7. **Set reasonable max_videos** limits (≤10 for most use cases)
