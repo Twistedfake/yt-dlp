@@ -2180,20 +2180,42 @@ if os.path.exists(api_file):
                     'videos': []
                 }
                 
-                # If only info is requested (no download/transcribe)
                 if not should_download and not should_transcribe:
-                    for video in videos:
-                        video_info = {
-                            'id': video['id'],
-                            'title': video.get('title', 'Unknown Title'),
-                            'url': f"https://www.youtube.com/watch?v={video['id']}",
-                            'duration': video.get('duration', 0),
-                            'upload_date': video.get('upload_date', ''),
-                            'view_count': video.get('view_count', 0),
-                            'uploader': video.get('uploader', channel_title)
-                        }
-                        response_data['videos'].append(video_info)
-                    
+                    # Use a single yt-dlp instance to fetch extra metadata for entries
+                    meta_opts = enhanced_opts.copy()
+                    meta_opts.update({
+                        'quiet': True,
+                        'skip_download': True,
+                        'nocheckcertificate': True,
+                    })
+
+                    with YoutubeDL(meta_opts) as meta_ydl:
+                        for video in videos:
+                            # Extract extra metadata only if upload_date is missing
+                            if not video.get('upload_date'):
+                                try:
+                                    video_meta = meta_ydl.extract_info(
+                                        f"https://www.youtube.com/watch?v={video['id']}", download=False)
+                                    # Merge the new data back
+                                    for k in ('upload_date', 'duration', 'view_count', 'uploader'):
+                                        if k in video_meta and video_meta[k] is not None:
+                                            video[k] = video_meta[k]
+                                except Exception:
+                                    pass  # ignore per-video failures
+
+                            video_info = {
+                                'id': video['id'],
+                                'title': video.get('title', 'Unknown Title'),
+                                'url': f"https://www.youtube.com/watch?v={video['id']}",
+                                'duration': video.get('duration', 0),
+                                'upload_date': (f"{str(video.get('upload_date'))[0:4]}-{str(video.get('upload_date'))[4:6]}-{str(video.get('upload_date'))[6:8]}" 
+                                               if video.get('upload_date') and len(str(video.get('upload_date'))) == 8 and str(video.get('upload_date')).isdigit() 
+                                               else video.get('upload_date', '')),
+                                'view_count': video.get('view_count', 0),
+                                'uploader': video.get('uploader', channel_title)
+                            }
+                            response_data['videos'].append(video_info)
+
                     return jsonify(response_data)
                 
                 # If download or transcribe is requested, use the job queue
