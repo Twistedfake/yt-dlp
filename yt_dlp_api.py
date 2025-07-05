@@ -2161,6 +2161,8 @@ if os.path.exists(api_file):
                     with YoutubeDL(metadata_opts) as ydl:
                         channel_info = ydl.extract_info(channel_url, download=False)
                         channel_title = channel_info.get('title', 'Unknown Channel')
+                        # Try to get canonical channel ID (UC....)
+                        channel_id = (channel_info.get('channel_id') or channel_info.get('id') or '')
                         normalized_url = channel_url  # yt-dlp handles normalization internally
                         
                 except Exception as e:
@@ -2173,6 +2175,7 @@ if os.path.exists(api_file):
                 response_data = {
                     'success': True,
                     'channel_title': channel_title,
+                    'channel_id': channel_id,
                     'channel_url': normalized_url,
                     'total_videos_found': len(all_videos),
                     'returned_videos': len(videos),
@@ -2260,6 +2263,7 @@ if os.path.exists(api_file):
                         'message': f'Channel processing job queued successfully for "{channel_title}"',
                         'channel_info': {
                             'title': channel_title,
+                            'id': channel_id,
                             'url': normalized_url,
                             'total_videos': len(videos),
                             'video_types': video_types,
