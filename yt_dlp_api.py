@@ -213,9 +213,9 @@ class JobQueue:
                 
             def dl(self, name, info, subtitle=False, test=False):
                 fd = MemoryHttpFD(self, self.params)
-                fd.real_download(name, info)
+                success = fd.real_download(name, info)
                 self.video_data = fd.get_downloaded_data()
-                return True
+                return ('finished', info) if success else ('error', info)
                 
         with MemoryYDL(enhanced_opts) as ydl:
             try:
@@ -493,7 +493,7 @@ class JobQueue:
                                     self.raise_no_formats(info, True)
                                 self.memory_downloader = MemoryHttpFD(self, self.params)
                                 success = self.memory_downloader.real_download(name, info)
-                                return success
+                                return ('finished', info) if success else ('error', info)
                         
                         with MemoryYDL(download_opts) as ydl:
                             info = ydl.extract_info(video_url, download=True)
@@ -1588,73 +1588,54 @@ class YtDlpAPI:
         @self.app.route('/download', methods=['POST'])
         @self.require_auth
         def download_video():
-            """Queue video download job and return job ID immediately"""
+            """Download the requested video and return it directly in the HTTP response"""
             try:
                 data = request.get_json()
                 if not data or 'url' not in data:
                     raise BadRequest('Missing URL in request body')
-                
+
                 url = data['url']
                 opts = data.get('options', {})
-                format_selector = data.get('format', None)
-                
-                # Transcription parameters
-                should_transcribe = data.get('transcribe', False)
-                transcribe_model = data.get('transcribe_model', 'base')
-                transcribe_language = data.get('transcribe_language', None)
-                transcribe_format = data.get('transcribe_format', 'json')
-                
-                # Create job
-                job_id = self.create_job('download', total_items=1, url=url)
-                
-                # Prepare job data
-                job_data = {
-                    'job_id': job_id,
-                    'type': 'download',
-                    'url': url,
-                    'options': opts,
-                    'format': format_selector,
-                    'transcribe': should_transcribe,
-                    'transcribe_model': transcribe_model,
-                    'transcribe_language': transcribe_language,
-                    'transcribe_format': transcribe_format,
-                    'api_instance': self
-                }
-                
-                # Add to queue
-                success = self.job_queue.add_job(job_data)
-                
-                if not success:
-                    return jsonify({
-                        'success': False,
-                        'error': 'Job queue is full. Please try again later.',
-                        'queue_stats': self.job_queue.get_stats()
-                    }), 503
-                
-                # Update job status
-                self.update_job(job_id, status='queued')
-                
-                return jsonify({
-                    'success': True,
-                    'job_id': job_id,
-                    'status': 'queued',
-                    'message': 'Download job queued successfully',
-                    'queue_position': self.job_queue.queue.qsize(),
-                    'endpoints': {
-                        'status': f'/job/{job_id}',
-                        'results': f'/job/{job_id}/results',
-                        'download': f'/job/{job_id}/download/0' if not should_transcribe else None
-                    },
-                    'queue_stats': self.job_queue.get_stats()
-                })
-                
+                format_selector = data.get('format')
+
+                # Prepare yt-dlp options
+                enhanced_opts = self._get_enhanced_ydl_opts(opts)
+                if format_selector:
+                    enhanced_opts['format'] = format_selector
+
+                class MemoryYDL(YoutubeDL):
+                    def __init__(self, params=None):
+                        super().__init__(params)
+                        self.video_data = None
+
+                    def dl(self, name, info, subtitle=False, test=False):
+                        fd = MemoryHttpFD(self, self.params)
+                        success = fd.real_download(name, info)
+                        self.video_data = fd.get_downloaded_data()
+                        return ('finished', info) if success else ('error', info)
+
+                with MemoryYDL(enhanced_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    video_data = ydl.video_data
+
+                if not video_data:
+                    raise Exception('No video data received')
+
+                # Derive filename and mimetype
+                ext = info.get('ext', 'mp4')
+                filename = f"{self.safe_filename_for_header(info.get('title', 'download'))}.{ext}"
+                mimetype = 'application/octet-stream'
+                if ext in ('mp4', 'mkv', 'webm'):
+                    mimetype = f'video/{ext}'
+                elif ext in ('mp3', 'm4a', 'aac', 'wav', 'flac'):
+                    mimetype = f'audio/{ext}'
+
+                response = Response(video_data, mimetype=mimetype)
+                response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+                response.headers['Content-Length'] = str(len(video_data))
+                return response
             except Exception as e:
-                error_msg = str(e)
-                return jsonify({
-                    'success': False,
-                    'error': error_msg,
-                    'traceback': traceback.format_exc()
-                }), 500
+                return jsonify({'success': False, 'error': str(e), 'traceback': traceback.format_exc()}), 500
 
         @self.app.route('/execute', methods=['POST'])
         @self.require_auth
@@ -2915,9 +2896,9 @@ if os.path.exists(api_file):
                                         
                                     def dl(self, name, info, subtitle=False, test=False):
                                         fd = MemoryHttpFD(self, self.params)
-                                        fd.real_download(name, info)
+                                        success = fd.real_download(name, info)
                                         self.video_data = fd.get_downloaded_data()
-                                        return True
+                                        return ('finished', info) if success else ('error', info)
                                 
                                 download_opts = enhanced_opts.copy()
                                 download_opts.update({'extract_flat': False})
