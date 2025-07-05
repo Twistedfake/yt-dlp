@@ -1050,7 +1050,7 @@ class YtDlpAPI:
             cookie_header = ytc.youtube()
             
             if cookie_header and len(cookie_header.strip()) > 50:  # Basic validation
-                # Convert cookie header to Netscape format and save to YTC-DL cookies.txt
+                # Convert cookie header string to Netscape format
                 netscape_cookies = self._convert_header_to_netscape(cookie_header)
                 
                 # Try to save to YTC-DL cookies.txt (primary location)
@@ -2597,13 +2597,12 @@ if os.path.exists(api_file):
                 opts = data.get('options', {})
                 
                 # Validate parameters
-                if max_results > 50:
-                    return jsonify({'error': 'max_results cannot exceed 50'}), 400
                 if max_results < 1:
                     return jsonify({'error': 'max_results must be at least 1'}), 400
                 
                 # Build search URL based on platform and type
-                search_url = self._build_search_url(platform, query, video_type, max_results, sort_by)
+                search_url = self._build_search_url(platform, query, video_type, max_results, sort_by, filter_creative_commons)
+                print(f"[DEBUG] Search URL: {search_url}")
                 
                 if download_results or transcribe_results:
                     # Create async job for search with download/transcription
@@ -2669,14 +2668,19 @@ if os.path.exists(api_file):
                 else:
                     # Immediate search results (metadata only)
                     enhanced_opts = self._get_enhanced_ydl_opts(opts)
+                    
+                    # For shorts, we need full metadata for duration. Otherwise, use fast search.
+                    use_flat_search = video_type != 'shorts'
+
                     enhanced_opts.update({
-                        'extract_flat': True,  # Get metadata only
+                        'extract_flat': use_flat_search,
                         'quiet': True,
                         **opts
                     })
                     
                     with YoutubeDL(enhanced_opts) as ydl:
                         search_results = ydl.extract_info(search_url, download=False)
+                        print(f"[DEBUG] yt-dlp returned: {len(search_results.get('entries', [])) if search_results and 'entries' in search_results else 'No entries'} entries")
                         
                         if not search_results or 'entries' not in search_results:
                             return jsonify({
@@ -2685,28 +2689,37 @@ if os.path.exists(api_file):
                                 'query': query
                             }), 404
                         
+                        entries = search_results.get('entries', [])
+
+                        # Post-filter for shorts to ensure accuracy
+                        if video_type == 'shorts':
+                            original_count = len(entries)
+                            
+                            def is_a_short(entry):
+                                if not entry:
+                                    return False
+                                duration = entry.get('duration')
+                                if duration is not None:
+                                    return duration > 0 and duration <= 61
+                                # Fallback to URL check if duration is missing
+                                url = entry.get('webpage_url') or entry.get('url', '')
+                                return '/shorts/' in url
+
+                            entries = [e for e in entries if is_a_short(e)]
+                            print(f"Filtered for shorts: Kept {len(entries)} of {original_count}")
+
                         # Format results
                         videos = []
-                        for entry in search_results.get('entries', []):
+                        for entry in entries:
                             if entry:
-                                # Check Creative Commons filter
-                                if filter_creative_commons:
-                                    license_info = entry.get('license', '').lower()
-                                    if not any(cc_term in license_info for cc_term in ['creative commons', 'cc-', 'attribution']):
-                                        continue  # Skip non-CC videos
-                                
                                 video_info = {
                                     'id': entry.get('id'),
                                     'title': entry.get('title'),
                                     'url': entry.get('webpage_url') or entry.get('url'),
                                     'duration': entry.get('duration'),
                                     'view_count': entry.get('view_count'),
-                                    'uploader': entry.get('uploader'),
-                                    'upload_date': entry.get('upload_date'),
-                                    'thumbnail': entry.get('thumbnail'),
                                     'description': entry.get('description', '')[:200] + '...' if entry.get('description') and len(entry.get('description', '')) > 200 else entry.get('description', ''),
-                                    'type': self._classify_video_type(entry),
-                                    'license': entry.get('license', 'Unknown')  # Add license info
+                                    'type': self._classify_video_type(entry)
                                 }
                                 videos.append(video_info)
                         
@@ -2740,7 +2753,7 @@ if os.path.exists(api_file):
                     'traceback': traceback.format_exc()
                 }), 500
 
-    def _build_search_url(self, platform, query, video_type, max_results, sort_by):
+    def _build_search_url(self, platform, query, video_type, max_results, sort_by, creative_commons_only=False):
         """Build search URL for different platforms and video types"""
         
         if platform == 'youtube':
@@ -2757,28 +2770,27 @@ if os.path.exists(api_file):
             else:
                 prefix = base_prefix
             
-            # Add video type filters to query
+            search_query = query
+
+            if creative_commons_only:
+                search_query = f"{query}, creativecommons"
+            
+            # Add video type hints to the query
             if video_type == 'shorts':
-                # Search for short videos (typically under 60 seconds)
-                search_query = f"{query} short video"
+                search_query += " #shorts"
             elif video_type == 'live':
-                search_query = f"{query} live stream"
-            elif video_type == 'all':
-                search_query = query
-            else:  # 'video' or default
-                search_query = query
-                
+                search_query += " live"
+            
             return f"{prefix}:{search_query}"
             
         elif platform == 'tiktok':
-            # TikTok search - most videos are short format
             return f"tiktoksearch{max_results}:{query}"
             
         elif platform == 'twitter' or platform == 'x':
-            return f"twitter:{query}"
+            return f"twittersearch{max_results}:{query}"
             
         elif platform == 'instagram':
-            return f"instagram:{query}"
+            return f"instagramsearch{max_results}:{query}"
             
         else:
             # Generic search for other platforms
@@ -2810,7 +2822,9 @@ if os.path.exists(api_file):
         transcribe_model = job_data.get('transcribe_model', 'base')
         transcribe_format = job_data.get('transcribe_format', 'json')
         randomize_results = job_data.get('randomize_results', False)
+        max_results = job_data.get('max_results', 10)
         random_seed = job_data.get('random_seed', None)
+        video_type = job_data.get('video_type')
         filter_creative_commons = job_data.get('filter_creative_commons', False)
         opts = job_data.get('options', {})
         
@@ -2819,8 +2833,12 @@ if os.path.exists(api_file):
         try:
             # Get search results
             enhanced_opts = api_instance._get_enhanced_ydl_opts(opts)
+
+            # Use flat search ONLY if NOT downloading AND NOT searching for shorts
+            use_flat_search = not download and video_type != 'shorts'
+
             enhanced_opts.update({
-                'extract_flat': not download,  # Extract full info if downloading
+                'extract_flat': use_flat_search,
                 'quiet': True,
                 **opts
             })
@@ -2833,6 +2851,23 @@ if os.path.exists(api_file):
                 
                 entries = [e for e in search_results.get('entries', []) if e]
                 
+                # Post-filter for shorts to ensure accuracy
+                if video_type == 'shorts':
+                    original_count = len(entries)
+                    
+                    def is_a_short(entry):
+                        if not entry:
+                            return False
+                        duration = entry.get('duration')
+                        if duration is not None:
+                            return duration > 0 and duration <= 61
+                        # Fallback to URL check if duration is missing
+                        url = entry.get('webpage_url') or entry.get('url', '')
+                        return '/shorts/' in url
+
+                    entries = [e for e in entries if is_a_short(e)]
+                    print(f"Filtered for shorts: Kept {len(entries)} of {original_count}")
+
                 # Randomize entries if requested
                 if randomize_results:
                     import random
@@ -2849,19 +2884,13 @@ if os.path.exists(api_file):
                 
                 results = []
                 transcriptions = []
-                
+                print(f"[DEBUG] Processing {(results)} entries")
                 for i, entry in enumerate(entries):
                     try:
                         api_instance.update_job(job_id, 
                             progress=30 + (i / len(entries)) * 60,
                             status_message=f'Processing video {i+1}/{len(entries)}'
                         )
-                        
-                        # Check Creative Commons filter
-                        if filter_creative_commons:
-                            license_info = entry.get('license', '').lower()
-                            if not any(cc_term in license_info for cc_term in ['creative commons', 'cc-', 'attribution']):
-                                continue  # Skip non-CC videos
                         
                         video_result = {
                             'index': i,
@@ -2870,10 +2899,8 @@ if os.path.exists(api_file):
                             'url': entry.get('webpage_url') or entry.get('url'),
                             'duration': entry.get('duration'),
                             'view_count': entry.get('view_count'),
-                            'uploader': entry.get('uploader'),
-                            'upload_date': entry.get('upload_date'),
+                            'description': entry.get('description', '')[:200] + '...' if entry.get('description') and len(entry.get('description', '')) > 200 else entry.get('description', ''),
                             'type': api_instance._classify_video_type(entry),
-                            'license': entry.get('license', 'Unknown'),
                             'success': True
                         }
                         
@@ -2965,6 +2992,7 @@ if os.path.exists(api_file):
                             'title': entry.get('title', 'Unknown'),
                             'url': entry.get('webpage_url') or entry.get('url')
                         })
+                print(f"[DEBUG] Appended {len(results)} results to response")
                 
                 # Store final results
                 final_result = {
